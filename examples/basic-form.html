@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>pixel-request-chunks basic form</title>
+  </head>
+  <body>
+    <form id="invoice-form">
+      <label>
+        Invoice ID
+        <input name="invoice_id" required>
+      </label>
+      <label>
+        Attachment
+        <input name="file" type="file">
+      </label>
+      <button type="submit">Send</button>
+    </form>
+
+    <pre id="status"></pre>
+
+    <script type="module">
+      import { send, getPendingForms } from 'https://esm.sh/pixel-request-chunks';
+
+      const form = document.querySelector('#invoice-form');
+      const status = document.querySelector('#status');
+
+      const pending = await getPendingForms();
+      if (pending.length > 0) {
+        status.textContent = `${pending.length} pending form snapshot(s) can be restored.`;
+      }
+
+      form.addEventListener('submit', async event => {
+        event.preventDefault();
+        status.textContent = 'Uploading...';
+
+        try {
+          const response = await send('/api/invoice', new FormData(form), {
+            onProgress(sent, total) {
+              status.textContent = `Uploading ${Math.round((sent / total) * 100)}%`;
+            },
+          });
+
+          status.textContent = `Done: ${response.status}`;
+        } catch (error) {
+          status.textContent = `Failed. Snapshot: ${error.snapshotId ?? 'not saved'}`;
+        }
+      });
+    </script>
+  </body>
+</html>
