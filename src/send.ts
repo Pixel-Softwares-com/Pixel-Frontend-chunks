@@ -3,6 +3,8 @@ import { sliceBlob } from './chunker';
 import { UploadError } from './errors';
 import { serialize } from './serialize';
 import { createSnapshot, deletePendingForm, recordSnapshotError } from './storage';
+import { createFetchTransport } from './transports/fetch';
+import { isTransportOk, type Transport, type TransportResponse } from './transport';
 import { completeSession, startSession, uploadChunks, type UploaderOptions } from './uploader';
 import type { SendData, SendOptions, SnapshotLastError, StartRequestBody, UploadErrorCode } from './types';
 
@@ -33,6 +35,18 @@ interface ResolvedSendOptions extends ChunkDecisionInput {
   snapshotTTL: number;
   signal?: AbortSignal;
   onProgress?: (sent: number, total: number) => void;
+  transport: Transport;
+}
+
+let defaultTransport: Transport | null = null;
+
+export function getDefaultTransport(): Transport {
+  defaultTransport ??= createFetchTransport();
+  return defaultTransport;
+}
+
+export function setDefaultTransport(transport: Transport | null): void {
+  defaultTransport = transport;
 }
 
 export function shouldChunk(
@@ -45,12 +59,16 @@ export function shouldChunk(
   return false;
 }
 
-export async function send(
+export async function send<T = unknown>(
   url: string,
   data: SendData,
   options: SendOptions = {},
-): Promise<Response> {
-  const merged: ResolvedSendOptions = { ...DEFAULTS, ...options };
+): Promise<TransportResponse<T>> {
+  const merged: ResolvedSendOptions = {
+    ...DEFAULTS,
+    ...options,
+    transport: options.transport ?? getDefaultTransport(),
+  };
   const method = options.method ?? 'POST';
   const userHeaders = options.headers ?? {};
 
@@ -68,31 +86,44 @@ export async function send(
 
   try {
     const response = !shouldChunk(blob.size, formDataEntryCount, merged)
-      ? await fetch(url, {
-          method,
-          headers: {
-            ...userHeaders,
-            'Content-Type': contentType,
-          },
-          body: blob,
-          signal: options.signal,
-        })
-      : await sendChunked(url, method, userHeaders, blob, contentType, merged);
+      ? await sendDirect<T>(url, method, userHeaders, blob, contentType, merged)
+      : await sendChunked<T>(url, method, userHeaders, blob, contentType, merged);
 
-    return finalizeResponse(response, snapshotId);
+    return await finalizeResponse(response, snapshotId);
   } catch (err) {
     throw await preserveSnapshotOnError(err, snapshotId);
   }
 }
 
-async function sendChunked(
+async function sendDirect<T>(
   url: string,
   method: string,
   userHeaders: Record<string, string>,
   blob: Blob,
   contentType: string,
   options: ResolvedSendOptions,
-): Promise<Response> {
+): Promise<TransportResponse<T>> {
+  return options.transport.request<T>({
+    url,
+    method,
+    headers: {
+      ...userHeaders,
+      'Content-Type': contentType,
+    },
+    body: blob,
+    signal: options.signal,
+    onUploadProgress: options.onProgress,
+  });
+}
+
+async function sendChunked<T>(
+  url: string,
+  method: string,
+  userHeaders: Record<string, string>,
+  blob: Blob,
+  contentType: string,
+  options: ResolvedSendOptions,
+): Promise<TransportResponse<T>> {
   const chunks = sliceBlob(blob, options.chunkSize);
   const fullChecksum = await sha256Hex(blob);
 
@@ -123,20 +154,24 @@ async function sendChunked(
     retryDelay: options.retryDelay,
     signal: options.signal,
     onChunkUploaded,
+    transport: options.transport,
   };
 
   const { uploadId } = await startSession(startBody, uploaderOptions);
   await uploadChunks(uploadId, chunks, uploaderOptions);
-  return completeSession(uploadId, uploaderOptions);
+  return (await completeSession(uploadId, uploaderOptions)) as TransportResponse<T>;
 }
 
-async function finalizeResponse(response: Response, snapshotId: string | undefined): Promise<Response> {
-  if (response.ok) {
+async function finalizeResponse<T>(
+  response: TransportResponse<T>,
+  snapshotId: string | undefined,
+): Promise<TransportResponse<T>> {
+  if (isTransportOk(response)) {
     if (snapshotId !== undefined) await deletePendingForm(snapshotId);
     return response;
   }
 
-  const error = await errorFromResponse(response, snapshotId);
+  const error = errorFromResponse(response, snapshotId);
   if (snapshotId !== undefined) {
     await recordSnapshotError(snapshotId, lastErrorFromUploadError(error));
   }
@@ -153,19 +188,17 @@ async function preserveSnapshotOnError(err: unknown, snapshotId: string | undefi
   return error;
 }
 
-async function errorFromResponse(
-  response: Response,
+function errorFromResponse(
+  response: TransportResponse,
   snapshotId: string | undefined,
-): Promise<UploadError> {
+): UploadError {
   let code: UploadErrorCode = 'target_failed';
   let message = `${response.status} ${response.statusText || 'Error'}`;
 
-  try {
-    const data = (await response.clone().json()) as { error?: { code?: string; message?: string } };
-    if (data?.error?.code) code = data.error.code as UploadErrorCode;
-    if (data?.error?.message) message = data.error.message;
-  } catch {
-    // Non-JSON target responses still preserve the snapshot with a generic target failure.
+  const data = response.data as { error?: { code?: string; message?: string } } | null | undefined;
+  if (data && typeof data === 'object' && data.error) {
+    if (data.error.code) code = data.error.code as UploadErrorCode;
+    if (data.error.message) message = data.error.message;
   }
 
   return new UploadError(code, message, { response, snapshotId });

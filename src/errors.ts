@@ -1,8 +1,9 @@
+import type { TransportResponse } from './transport';
 import type { UploadErrorCode } from './types';
 
 export interface UploadErrorOptions {
   snapshotId?: string;
-  response?: Response;
+  response?: TransportResponse;
   chunkIndex?: number;
   cause?: unknown;
 }
@@ -10,7 +11,7 @@ export interface UploadErrorOptions {
 export class UploadError extends Error {
   readonly code: UploadErrorCode;
   readonly snapshotId?: string;
-  readonly response?: Response;
+  readonly response?: TransportResponse;
   readonly chunkIndex?: number;
 
   constructor(code: UploadErrorCode, message: string, options: UploadErrorOptions = {}) {

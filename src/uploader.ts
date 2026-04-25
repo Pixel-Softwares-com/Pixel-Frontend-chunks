@@ -1,5 +1,7 @@
 import { sha256Hex } from './checksum';
 import { UploadError } from './errors';
+import type { Transport, TransportResponse } from './transport';
+import { isTransportOk } from './transport';
 import type { StartRequestBody, StartResponseBody, UploadErrorCode } from './types';
 
 export const WIRE_VERSION = '1';
@@ -12,13 +14,15 @@ export interface UploaderOptions {
   retryDelay: number;
   signal?: AbortSignal;
   onChunkUploaded?: (bytes: number) => void;
+  transport: Transport;
 }
 
 export async function startSession(
   body: StartRequestBody,
   options: UploaderOptions,
 ): Promise<StartResponseBody> {
-  const response = await fetch(joinUrl(options.prefix, '/start'), {
+  const response = await options.transport.request<StartResponseBody>({
+    url: joinUrl(options.prefix, '/start'),
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -27,13 +31,14 @@ export async function startSession(
     },
     body: JSON.stringify(body),
     signal: options.signal,
+    responseType: 'json',
   });
 
-  if (!response.ok) {
-    throw await errorFromResponse('start_failed', response);
+  if (!isTransportOk(response)) {
+    throw errorFromResponse('start_failed', response);
   }
 
-  return (await response.json()) as StartResponseBody;
+  return response.data;
 }
 
 export async function uploadChunks(
@@ -91,7 +96,7 @@ async function uploadOneChunkWithRetry(
       throw new UploadError('aborted', 'Upload aborted', { chunkIndex: index });
     }
 
-    let response: Response | null = null;
+    let response: TransportResponse | null = null;
     let networkError: unknown = null;
 
     try {
@@ -101,7 +106,8 @@ async function uploadOneChunkWithRetry(
       form.append('chunkChecksum', checksum);
       form.append('chunk', chunk, `chunk_${index}`);
 
-      response = await fetch(joinUrl(options.prefix, '/chunk'), {
+      response = await options.transport.request({
+        url: joinUrl(options.prefix, '/chunk'),
         method: 'POST',
         headers: {
           Accept: 'application/json',
@@ -109,6 +115,7 @@ async function uploadOneChunkWithRetry(
         },
         body: form,
         signal: options.signal,
+        responseType: 'json',
       });
     } catch (err) {
       networkError = err;
@@ -116,13 +123,13 @@ async function uploadOneChunkWithRetry(
 
     if (response !== null) {
       // 200 = accepted, 409 = idempotent duplicate (already received) — both success.
-      if (response.ok || response.status === 409) return;
+      if (isTransportOk(response) || response.status === 409) return;
 
       const isRetryable =
         response.status >= 500 || response.status === 408 || response.status === 429;
 
       if (!isRetryable || attempt >= options.retries) {
-        throw await errorFromResponse('chunk_failed', response, index);
+        throw errorFromResponse('chunk_failed', response, index);
       }
     } else if (networkError !== null) {
       if (attempt >= options.retries) {
@@ -143,8 +150,9 @@ async function uploadOneChunkWithRetry(
 export async function completeSession(
   uploadId: string,
   options: UploaderOptions,
-): Promise<Response> {
-  return fetch(joinUrl(options.prefix, '/complete'), {
+): Promise<TransportResponse> {
+  return options.transport.request({
+    url: joinUrl(options.prefix, '/complete'),
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -160,22 +168,25 @@ function joinUrl(prefix: string, path: string): string {
   return trimmed + path;
 }
 
-async function errorFromResponse(
+function errorFromResponse(
   fallbackCode: UploadErrorCode,
-  response: Response,
+  response: TransportResponse,
   chunkIndex?: number,
-): Promise<UploadError> {
+): UploadError {
   let code: UploadErrorCode = fallbackCode;
   let message = `${response.status} ${response.statusText || 'Error'}`;
-  try {
-    const cloned = response.clone();
-    const data = (await cloned.json()) as { error?: { code?: string; message?: string } };
-    if (data?.error?.code) code = data.error.code as UploadErrorCode;
-    if (data?.error?.message) message = data.error.message;
-  } catch {
-    // body not JSON or unreadable — keep fallback
+
+  const data = response.data as { error?: { code?: string; message?: string } } | null | undefined;
+  if (data && typeof data === 'object' && data.error) {
+    if (data.error.code) code = data.error.code as UploadErrorCode;
+    if (data.error.message) message = data.error.message;
   }
-  return new UploadError(code, message, chunkIndex !== undefined ? { response, chunkIndex } : { response });
+
+  return new UploadError(
+    code,
+    message,
+    chunkIndex !== undefined ? { response, chunkIndex } : { response },
+  );
 }
 
 function sleep(ms: number): Promise<void> {

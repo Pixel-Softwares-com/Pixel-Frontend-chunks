@@ -1,3 +1,5 @@
+import type { Transport } from './transport';
+
 export interface SendOptions {
   method?: string;
   headers?: Record<string, string>;
@@ -16,6 +18,8 @@ export interface SendOptions {
   snapshotTTL?: number;
 
   onProgress?: (sent: number, total: number) => void;
+
+  transport?: Transport;
 }
 
 export type SendData =
