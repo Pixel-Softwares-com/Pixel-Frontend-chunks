@@ -48,7 +48,7 @@ describe('createChunkedAxiosAdapter', () => {
     expect(response.headers['x-result']).toBe('ok');
     expect(requests).toHaveLength(1);
     expect(requests[0]!.baseURL).toBe('https://api.example.test');
-    expect(requests[0]!.url).toBe('https://api.example.test/users');
+    expect(requests[0]!.url).toBe('/users');
     expect(requests[0]!.headers).toMatchObject({
       Authorization: 'Bearer token',
       'Content-Type': 'application/json',
@@ -156,5 +156,57 @@ describe('createChunkedAxiosAdapter', () => {
       '/chunk-transport/chunk',
       '/chunk-transport/complete',
     ]);
+  });
+
+  it('sends a relative targetUrl when chunking with an absolute baseURL', async () => {
+    const { axios, requests } = createAxiosMock((request) => {
+      if (request.url?.endsWith('/chunk-transport/start')) {
+        return {
+          status: 200,
+          statusText: 'OK',
+          headers: {},
+          data: { uploadId: 'upload-1' },
+        };
+      }
+
+      if (request.url?.endsWith('/chunk-transport/chunk')) {
+        return {
+          status: 200,
+          statusText: 'OK',
+          headers: {},
+          data: {},
+        };
+      }
+
+      if (request.url?.endsWith('/chunk-transport/complete')) {
+        return {
+          status: 200,
+          statusText: 'OK',
+          headers: {},
+          data: { ok: true },
+        };
+      }
+
+      return {
+        status: 500,
+        statusText: 'Unexpected',
+        headers: {},
+        data: {},
+      };
+    });
+    const adapter = createChunkedAxiosAdapter(axios, {
+      chunkThresholdBytes: 1,
+      saveSnapshot: false,
+    });
+
+    await adapter({
+      baseURL: 'https://pixel.stg.trakel.app',
+      url: '/api/client-rfqs?filtered_branches_ids%5B0%5D=1',
+      method: 'post',
+      data: { name: 'Ada Lovelace' },
+    });
+
+    const startBody = JSON.parse(String(requests[0]!.data));
+    expect(startBody.targetUrl).toBe('/api/client-rfqs?filtered_branches_ids%5B0%5D=1');
   });
 });

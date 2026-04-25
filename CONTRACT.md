@@ -60,7 +60,7 @@ Initiates an upload session.
 
 | Field | Type | Required | Notes |
 |---|---|---|---|
-| `targetUrl` | string | yes | Relative path only. MUST start with `/`, MUST NOT start with `//`, MUST NOT contain `://`, MUST NOT match any `forbidden_target_prefixes`. |
+| `targetUrl` | string | yes | Target route path. SHOULD be relative and start with `/`. Same-host absolute URLs MAY be accepted and normalized to a relative path. External URLs, protocol-relative URLs, and values matching `forbidden_target_prefixes` are rejected. |
 | `method` | string | yes | HTTP method to use on the forwarded request (`POST`, `PUT`, `PATCH`, `DELETE`). |
 | `contentType` | string | yes | Exact `Content-Type` of the original request, including `multipart/...` boundary if applicable. Replayed verbatim onto the forwarded request. |
 | `totalBytes` | integer | yes | Total payload size in bytes. MUST be ≤ `max_total_bytes`. |
@@ -187,14 +187,18 @@ The JS client treats any non-2xx final response as `target_failed` unless the re
 
 ---
 
-## `targetUrl` validation (relative-only)
+## `targetUrl` validation
+
+The client SHOULD send `targetUrl` as a relative path such as `/api/invoice`.
+
+The server MAY accept an absolute URL only when its host matches the current request host, then normalize it to `path?query` before storing the upload session. This is a compatibility fallback for apps behind proxies; clients should not depend on it.
 
 The server MUST reject `targetUrl` if **any** of the following is true:
 
 1. Does not start with `/`
 2. Starts with `//` (protocol-relative)
-3. Contains `://` (absolute URL)
-4. Starts with any value in `forbidden_target_prefixes` config (loop prevention)
+3. Contains `://` and is not same-host with the current request
+4. Starts with any value in `forbidden_target_prefixes` config after normalization (loop prevention)
 
 External URLs are explicitly out of scope for v1.
 

@@ -63,7 +63,7 @@ export function createChunkedAxiosAdapter(
     const headers = normalizeRequestHeaders(config.headers);
     const signal = config.signal ?? defaults.signal;
     const transport = config.transport ?? defaults.transport ?? getTransport(config.baseURL);
-    const url = buildFullUrl(axios, config);
+    const url = buildRequestUrl(axios, config);
 
     try {
       const tr =
@@ -122,11 +122,32 @@ function resolveSendOptions(defaults: SendOptions, config: AxiosAdapterRequestCo
   };
 }
 
-function buildFullUrl(axios: AxiosStaticLike, config: AxiosAdapterRequestConfig): string {
+function buildRequestUrl(axios: AxiosStaticLike, config: AxiosAdapterRequestConfig): string {
   const url = axios.getUri(config);
   const { baseURL } = config;
-  if (!baseURL || /^([a-z][a-z\d+\-.]*:)?\/\//i.test(url)) return url;
-  return `${baseURL.replace(/\/+$/, '')}/${url.replace(/^\/+/, '')}`;
+  if (!baseURL) return url;
+
+  const relative = stripBaseUrl(url, baseURL);
+  return ensureLeadingSlash(relative);
+}
+
+function stripBaseUrl(url: string, baseURL: string): string {
+  try {
+    const parsedUrl = new URL(url, baseURL);
+    const parsedBase = new URL(baseURL);
+    if (parsedUrl.origin === parsedBase.origin) {
+      return `${parsedUrl.pathname}${parsedUrl.search}${parsedUrl.hash}`;
+    }
+  } catch {
+    // Fall back to string handling below for non-standard adapter inputs.
+  }
+
+  return url;
+}
+
+function ensureLeadingSlash(url: string): string {
+  if (/^([a-z][a-z\d+\-.]*:)?\/\//i.test(url)) return url;
+  return url.startsWith('/') ? url : `/${url}`;
 }
 
 function normalizeRequestHeaders(headers: AxiosAdapterRequestConfig['headers'] = {}): Record<string, string> {
