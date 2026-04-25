@@ -100,4 +100,61 @@ describe('createChunkedAxiosAdapter', () => {
       },
     });
   });
+
+  it('falls back to send defaults when adapter defaults are partial', async () => {
+    const { axios, requests } = createAxiosMock((request) => {
+      if (request.url?.endsWith('/chunk-transport/start')) {
+        return {
+          status: 200,
+          statusText: 'OK',
+          headers: {},
+          data: { uploadId: 'upload-1' },
+        };
+      }
+
+      if (request.url?.endsWith('/chunk-transport/chunk')) {
+        return {
+          status: 200,
+          statusText: 'OK',
+          headers: {},
+          data: {},
+        };
+      }
+
+      if (request.url?.endsWith('/chunk-transport/complete')) {
+        return {
+          status: 200,
+          statusText: 'OK',
+          headers: {},
+          data: { ok: true },
+        };
+      }
+
+      return {
+        status: 500,
+        statusText: 'Unexpected',
+        headers: {},
+        data: {},
+      };
+    });
+    const adapter = createChunkedAxiosAdapter(axios, {
+      chunkThresholdBytes: 1,
+      saveSnapshot: false,
+    });
+
+    const response = await adapter({
+      baseURL: 'https://api.example.test',
+      url: '/users',
+      method: 'post',
+      data: { name: 'Ada Lovelace' },
+    });
+
+    expect(response.status).toBe(200);
+    expect(response.data).toEqual({ ok: true });
+    expect(requests.map(request => request.url)).toEqual([
+      '/chunk-transport/start',
+      '/chunk-transport/chunk',
+      '/chunk-transport/complete',
+    ]);
+  });
 });

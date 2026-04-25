@@ -1,5 +1,5 @@
 import { UploadError } from './errors';
-import { send } from './send';
+import { DEFAULTS, send } from './send';
 import type { TransportResponseType } from './transport';
 import type { SendData, SendOptions } from './types';
 import { createAxiosTransport, type AxiosLikeInstance } from './transports/axios';
@@ -110,15 +110,15 @@ export function createChunkedAxiosAdapter(
 
 function resolveSendOptions(defaults: SendOptions, config: AxiosAdapterRequestConfig): SendOptions {
   return {
-    chunkSize: config.chunkSize ?? defaults.chunkSize,
-    chunkThresholdBytes: config.chunkThresholdBytes ?? defaults.chunkThresholdBytes,
-    maxFormDataEntries: config.maxFormDataEntries ?? defaults.maxFormDataEntries,
-    concurrency: config.concurrency ?? defaults.concurrency,
-    retries: config.retries ?? defaults.retries,
-    retryDelay: config.retryDelay ?? defaults.retryDelay,
-    prefix: config.prefix ?? defaults.prefix,
-    saveSnapshot: config.saveSnapshot ?? defaults.saveSnapshot,
-    snapshotTTL: config.snapshotTTL ?? defaults.snapshotTTL,
+    chunkSize: config.chunkSize ?? defaults.chunkSize ?? DEFAULTS.chunkSize,
+    chunkThresholdBytes: config.chunkThresholdBytes ?? defaults.chunkThresholdBytes ?? DEFAULTS.chunkThresholdBytes,
+    maxFormDataEntries: config.maxFormDataEntries ?? defaults.maxFormDataEntries ?? DEFAULTS.maxFormDataEntries,
+    concurrency: config.concurrency ?? defaults.concurrency ?? DEFAULTS.concurrency,
+    retries: config.retries ?? defaults.retries ?? DEFAULTS.retries,
+    retryDelay: config.retryDelay ?? defaults.retryDelay ?? DEFAULTS.retryDelay,
+    prefix: config.prefix ?? defaults.prefix ?? DEFAULTS.prefix,
+    saveSnapshot: config.saveSnapshot ?? defaults.saveSnapshot ?? DEFAULTS.saveSnapshot,
+    snapshotTTL: config.snapshotTTL ?? defaults.snapshotTTL ?? DEFAULTS.snapshotTTL,
   };
 }
 
