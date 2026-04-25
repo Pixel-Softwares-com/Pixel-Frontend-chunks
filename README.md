@@ -5,7 +5,7 @@ JS client for transport-level request chunking with form snapshots and recovery.
 ## Install from GitHub
 
 ```bash
-npm install github:Pixel-Softwares-com/Pixel-Frontend-chunks#v0.1.0
+npm install github:Pixel-Softwares-com/Pixel-Frontend-chunks#v0.3.0
 ```
 
 ## Use
@@ -24,5 +24,20 @@ const response = await send('/api/invoices', formData, {
   onProgress(sent, total) {
     console.log(Math.round((sent / total) * 100));
   },
+});
+```
+
+## Axios adapter
+
+```ts
+import axios from 'axios';
+import { createChunkedAxiosAdapter } from 'pixel-request-chunks';
+
+const api = axios.create({
+  baseURL: 'https://api.example.com',
+  adapter: createChunkedAxiosAdapter(axios, {
+    chunkThresholdBytes: 500 * 1024,
+    saveSnapshot: false,
+  }),
 });
 ```

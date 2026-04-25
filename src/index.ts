@@ -22,6 +22,15 @@ export type {
   AxiosLikeProgressEvent,
 } from './transports/axios';
 
+export { createChunkedAxiosAdapter } from './axiosAdapter';
+export type {
+  AxiosAdapter,
+  AxiosAdapterError,
+  AxiosAdapterRequestConfig,
+  AxiosAdapterResponse,
+  AxiosStaticLike,
+} from './axiosAdapter';
+
 export type {
   SendOptions,
   SendData,
