@@ -5,7 +5,7 @@ JS client for transport-level request chunking with form snapshots and recovery.
 ## Install from GitHub
 
 ```bash
-npm install github:Pixel-Softwares-com/Pixel-Frontend-chuncks#v0.1.0
+npm install github:Pixel-Softwares-com/Pixel-Frontend-chunks#v0.1.0
 ```
 
 ## Use

@@ -5,12 +5,12 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/Pixel-Softwares-com/Pixel-Frontend-chuncks.git"
+    "url": "git+https://github.com/Pixel-Softwares-com/Pixel-Frontend-chunks.git"
   },
   "bugs": {
-    "url": "https://github.com/Pixel-Softwares-com/Pixel-Frontend-chuncks/issues"
+    "url": "https://github.com/Pixel-Softwares-com/Pixel-Frontend-chunks/issues"
   },
-  "homepage": "https://github.com/Pixel-Softwares-com/Pixel-Frontend-chuncks#readme",
+  "homepage": "https://github.com/Pixel-Softwares-com/Pixel-Frontend-chunks#readme",
   "type": "module",
   "main": "./dist/index.cjs",
   "module": "./dist/index.js",
