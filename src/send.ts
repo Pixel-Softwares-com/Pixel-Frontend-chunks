@@ -221,8 +221,12 @@ async function finalizeResponse<T>(
   }
 
   const error = errorFromResponse(response, snapshotId);
-  if (snapshotId !== undefined && shouldTrackError(error.classification, trackErrors)) {
-    await recordSnapshotError(snapshotId, lastErrorFromUploadError(error));
+  if (snapshotId !== undefined) {
+    if (shouldTrackError(error.classification, trackErrors)) {
+      await recordSnapshotError(snapshotId, lastErrorFromUploadError(error));
+    } else {
+      await deletePendingForm(snapshotId);
+    }
   }
 
   throw error;
@@ -234,8 +238,12 @@ async function preserveSnapshotOnError(
   trackErrors: TrackErrorsOption | undefined,
 ): Promise<Error> {
   const error = toUploadError(err, snapshotId);
-  if (snapshotId !== undefined && shouldTrackError(error.classification, trackErrors)) {
-    await recordSnapshotError(snapshotId, lastErrorFromUploadError(error));
+  if (snapshotId !== undefined) {
+    if (shouldTrackError(error.classification, trackErrors)) {
+      await recordSnapshotError(snapshotId, lastErrorFromUploadError(error));
+    } else {
+      await deletePendingForm(snapshotId);
+    }
   }
 
   return error;
