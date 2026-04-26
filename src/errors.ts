@@ -66,10 +66,10 @@ export function shouldTrackError(
   classification: ErrorClassification | undefined,
   trackErrors: TrackErrorsOption | undefined,
 ): boolean {
-  if (classification === 'abort') return false;
   if (classification === undefined) return false;
 
   if (trackErrors === 'all') return true;
+  if (classification === 'abort') return trackErrors === 'all';
 
   if (trackErrors === undefined) {
     return DEFAULT_TRACKED_ERRORS.includes(

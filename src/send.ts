@@ -90,6 +90,7 @@ export async function send<T = unknown>(
   };
   const method = options.method ?? 'POST';
   const userHeaders = options.headers ?? {};
+  const resolvedUrl = resolveUrl(url, options.baseUrl);
 
   profiler.start('total');
   let outcome: 'ok' | 'failed' = 'failed';
@@ -97,7 +98,7 @@ export async function send<T = unknown>(
   const { blob, contentType, formDataEntryCount } = await serialize(data);
   const snapshotId = merged.saveSnapshot
     ? await createSnapshot({
-        targetUrl: url,
+        targetUrl: resolvedUrl,
         method,
         headers: userHeaders,
         contentType,
@@ -108,8 +109,8 @@ export async function send<T = unknown>(
 
   try {
     const response = !shouldChunk(blob.size, formDataEntryCount, merged)
-      ? await sendDirect<T>(url, method, userHeaders, blob, contentType, merged)
-      : await sendChunked<T>(url, method, userHeaders, blob, contentType, merged);
+      ? await sendDirect<T>(resolvedUrl, method, userHeaders, blob, contentType, merged)
+      : await sendChunked<T>(resolvedUrl, method, userHeaders, blob, contentType, merged);
 
     const finalized = await finalizeResponse(response, snapshotId, merged.trackErrors);
     outcome = 'ok';
@@ -120,6 +121,25 @@ export async function send<T = unknown>(
     profiler.end('total', { sizeBytes: blob.size, outcome });
     profiler.flush();
   }
+}
+
+function resolveUrl(url: string, baseUrl: string | undefined): string {
+  if (/^https?:\/\//i.test(url)) return url;
+  if (baseUrl !== undefined) {
+    try {
+      return new URL(url, baseUrl).toString();
+    } catch {
+      return url;
+    }
+  }
+  if (typeof window !== 'undefined' && window.location) {
+    try {
+      return new URL(url, window.location.origin).toString();
+    } catch {
+      return url;
+    }
+  }
+  return url;
 }
 
 async function sendDirect<T>(

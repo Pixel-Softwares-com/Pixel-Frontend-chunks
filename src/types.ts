@@ -20,6 +20,7 @@ export const DEFAULT_TRACKED_ERRORS: ReadonlyArray<number | 'network' | 'cors' |
 export interface SendOptions {
   method?: string;
   headers?: Record<string, string>;
+  baseUrl?: string;
   signal?: AbortSignal;
 
   chunkSize?: number;
