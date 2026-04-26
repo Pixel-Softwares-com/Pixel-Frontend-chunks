@@ -1,6 +1,22 @@
 import type { ProfileEntry } from './profiler';
 import type { Transport } from './transport';
 
+export type ErrorClassification = number | 'network' | 'cors' | 'timeout' | 'abort';
+
+export type TrackErrorsOption = 'all' | Array<number | 'network' | 'cors' | 'timeout'>;
+
+export const DEFAULT_TRACKED_ERRORS: ReadonlyArray<number | 'network' | 'cors' | 'timeout'> = [
+  408,
+  429,
+  500,
+  502,
+  503,
+  504,
+  'network',
+  'cors',
+  'timeout',
+];
+
 export interface SendOptions {
   method?: string;
   headers?: Record<string, string>;
@@ -17,6 +33,8 @@ export interface SendOptions {
 
   saveSnapshot?: boolean;
   snapshotTTL?: number;
+
+  trackErrors?: TrackErrorsOption;
 
   onProgress?: (sent: number, total: number) => void;
 

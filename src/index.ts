@@ -1,5 +1,5 @@
 export { send, shouldChunk, DEFAULTS, getDefaultTransport, setDefaultTransport } from './send';
-export { UploadError } from './errors';
+export { UploadError, classifyTransportError, isAbortError, shouldTrackError } from './errors';
 export { getPendingForms, restoreForm, deletePendingForm, clearAllPending } from './storage';
 export { WIRE_VERSION, VERSION_HEADER } from './uploader';
 
@@ -36,8 +36,11 @@ export type {
   SendData,
   SerializedPayload,
   UploadErrorCode,
+  ErrorClassification,
+  TrackErrorsOption,
   StartRequestBody,
   StartResponseBody,
   SnapshotLastError,
   PendingForm,
 } from './types';
+export { DEFAULT_TRACKED_ERRORS } from './types';

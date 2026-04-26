@@ -1,13 +1,21 @@
 import { sha256Hex } from './checksum';
 import { sliceBlob } from './chunker';
-import { UploadError } from './errors';
+import { classifyTransportError, shouldTrackError, UploadError } from './errors';
 import { Profiler } from './profiler';
 import { serialize } from './serialize';
 import { createSnapshot, deletePendingForm, recordSnapshotError } from './storage';
 import { createFetchTransport } from './transports/fetch';
 import { isTransportOk, type Transport, type TransportResponse } from './transport';
 import { completeSession, startSession, uploadChunks, type UploaderOptions } from './uploader';
-import type { SendData, SendOptions, SnapshotLastError, StartRequestBody, UploadErrorCode } from './types';
+import type {
+  ErrorClassification,
+  SendData,
+  SendOptions,
+  SnapshotLastError,
+  StartRequestBody,
+  TrackErrorsOption,
+  UploadErrorCode,
+} from './types';
 
 export const DEFAULTS = {
   chunkSize: 1024 * 1024,
@@ -35,6 +43,7 @@ interface ResolvedSendOptions extends ChunkDecisionInput {
   saveSnapshot: boolean;
   snapshotTTL: number;
   signal?: AbortSignal;
+  trackErrors?: TrackErrorsOption;
   onProgress?: (sent: number, total: number) => void;
   transport: Transport;
   profiler: Profiler;
@@ -102,11 +111,11 @@ export async function send<T = unknown>(
       ? await sendDirect<T>(url, method, userHeaders, blob, contentType, merged)
       : await sendChunked<T>(url, method, userHeaders, blob, contentType, merged);
 
-    const finalized = await finalizeResponse(response, snapshotId);
+    const finalized = await finalizeResponse(response, snapshotId, merged.trackErrors);
     outcome = 'ok';
     return finalized;
   } catch (err) {
-    throw await preserveSnapshotOnError(err, snapshotId);
+    throw await preserveSnapshotOnError(err, snapshotId, merged.trackErrors);
   } finally {
     profiler.end('total', { sizeBytes: blob.size, outcome });
     profiler.flush();
@@ -184,6 +193,7 @@ async function sendChunked<T>(
 async function finalizeResponse<T>(
   response: TransportResponse<T>,
   snapshotId: string | undefined,
+  trackErrors: TrackErrorsOption | undefined,
 ): Promise<TransportResponse<T>> {
   if (isTransportOk(response)) {
     if (snapshotId !== undefined) await deletePendingForm(snapshotId);
@@ -191,16 +201,20 @@ async function finalizeResponse<T>(
   }
 
   const error = errorFromResponse(response, snapshotId);
-  if (snapshotId !== undefined) {
+  if (snapshotId !== undefined && shouldTrackError(error.classification, trackErrors)) {
     await recordSnapshotError(snapshotId, lastErrorFromUploadError(error));
   }
 
   throw error;
 }
 
-async function preserveSnapshotOnError(err: unknown, snapshotId: string | undefined): Promise<Error> {
+async function preserveSnapshotOnError(
+  err: unknown,
+  snapshotId: string | undefined,
+  trackErrors: TrackErrorsOption | undefined,
+): Promise<Error> {
   const error = toUploadError(err, snapshotId);
-  if (snapshotId !== undefined) {
+  if (snapshotId !== undefined && shouldTrackError(error.classification, trackErrors)) {
     await recordSnapshotError(snapshotId, lastErrorFromUploadError(error));
   }
 
@@ -220,21 +234,31 @@ function errorFromResponse(
     if (data.error.message) message = data.error.message;
   }
 
-  return new UploadError(code, message, { response, snapshotId });
+  return new UploadError(code, message, {
+    response,
+    snapshotId,
+    classification: response.status,
+  });
 }
 
 function toUploadError(err: unknown, snapshotId: string | undefined): UploadError {
   if (err instanceof UploadError) {
+    const classification: ErrorClassification | undefined =
+      err.classification ?? (err.response ? err.response.status : classifyTransportError(err.cause));
     return new UploadError(err.code, err.message, {
       snapshotId,
       response: err.response,
       chunkIndex: err.chunkIndex,
+      classification,
       cause: err,
     });
   }
 
-  return new UploadError('target_failed', String((err as Error)?.message ?? err), {
+  const classification = classifyTransportError(err);
+  const code: UploadErrorCode = classification === 'abort' ? 'aborted' : 'target_failed';
+  return new UploadError(code, String((err as Error)?.message ?? err), {
     snapshotId,
+    classification,
     cause: err,
   });
 }

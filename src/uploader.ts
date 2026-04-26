@@ -1,5 +1,5 @@
 import { sha256Hex } from './checksum';
-import { UploadError } from './errors';
+import { classifyTransportError, UploadError } from './errors';
 import { Profiler } from './profiler';
 import type { Transport, TransportResponse } from './transport';
 import { isTransportOk } from './transport';
@@ -69,7 +69,7 @@ export async function uploadChunks(
   const worker = async (): Promise<void> => {
     while (firstError === null) {
       if (options.signal?.aborted) {
-        firstError = new UploadError('aborted', 'Upload aborted');
+        firstError = new UploadError('aborted', 'Upload aborted', { classification: 'abort' });
         return;
       }
       const i = cursor++;
@@ -104,6 +104,7 @@ export async function uploadChunks(
     if (firstError instanceof UploadError) throw firstError;
     throw new UploadError('chunk_failed', String((firstError as Error)?.message ?? firstError), {
       cause: firstError,
+      classification: classifyTransportError(firstError),
     });
   }
 }
@@ -130,7 +131,10 @@ async function uploadOneChunkWithRetry(
     while (true) {
       if (options.signal?.aborted) {
         outcome = 'aborted';
-        throw new UploadError('aborted', 'Upload aborted', { chunkIndex: index });
+        throw new UploadError('aborted', 'Upload aborted', {
+          chunkIndex: index,
+          classification: 'abort',
+        });
       }
 
       attempts = attempt + 1;
@@ -178,11 +182,20 @@ async function uploadOneChunkWithRetry(
           throw errorFromResponse('chunk_failed', response, index);
         }
       } else if (networkError !== null) {
+        const classification = classifyTransportError(networkError);
+        if (classification === 'abort') {
+          outcome = 'aborted';
+          throw new UploadError('aborted', 'Upload aborted', {
+            chunkIndex: index,
+            classification: 'abort',
+            cause: networkError,
+          });
+        }
         if (attempt >= options.retries) {
           throw new UploadError(
             'chunk_failed',
             `Chunk ${index} failed after ${options.retries} retries`,
-            { chunkIndex: index, cause: networkError },
+            { chunkIndex: index, cause: networkError, classification },
           );
         }
       }
@@ -251,7 +264,9 @@ function errorFromResponse(
   return new UploadError(
     code,
     message,
-    chunkIndex !== undefined ? { response, chunkIndex } : { response },
+    chunkIndex !== undefined
+      ? { response, chunkIndex, classification: response.status }
+      : { response, classification: response.status },
   );
 }
 

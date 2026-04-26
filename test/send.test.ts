@@ -185,7 +185,7 @@ describe('send (decision routing)', () => {
 
   it('preserves the snapshot and exposes snapshotId when the target response fails', async () => {
     const { fn } = makeFetchMock(
-      () => new Response(JSON.stringify({ message: 'invalid' }), { status: 422 }),
+      () => new Response(JSON.stringify({ message: 'invalid' }), { status: 500 }),
     );
     globalThis.fetch = fn;
 
@@ -199,7 +199,8 @@ describe('send (decision routing)', () => {
     expect(caught).toBeInstanceOf(UploadError);
     const error = caught as UploadError;
     expect(error.code).toBe('target_failed');
-    expect(error.response?.status).toBe(422);
+    expect(error.response?.status).toBe(500);
+    expect(error.classification).toBe(500);
     expect(error.snapshotId).toBeTruthy();
 
     const pending = await getPendingForms();
@@ -209,9 +210,92 @@ describe('send (decision routing)', () => {
     expect(pending[0]!.fields.json).toBe(JSON.stringify({ invoice_id: 123 }));
     expect(pending[0]!.lastError).toEqual({
       code: 'target_failed',
+      message: '500 Error',
+      httpStatus: 500,
+    });
+  });
+
+  it('does not record lastError for non-whitelisted status (default)', async () => {
+    const { fn } = makeFetchMock(
+      () => new Response(JSON.stringify({ message: 'invalid' }), { status: 422 }),
+    );
+    globalThis.fetch = fn;
+
+    let caught: unknown;
+    try {
+      await send('/api/test', { invoice_id: 123 });
+    } catch (err) {
+      caught = err;
+    }
+
+    const error = caught as UploadError;
+    expect(error.classification).toBe(422);
+    expect(error.snapshotId).toBeTruthy();
+
+    const pending = await getPendingForms();
+    expect(pending).toHaveLength(1);
+    expect(pending[0]!.lastError).toBeUndefined();
+  });
+
+  it('records lastError for any status when trackErrors is "all"', async () => {
+    const { fn } = makeFetchMock(
+      () => new Response('bad', { status: 422 }),
+    );
+    globalThis.fetch = fn;
+
+    let caught: unknown;
+    try {
+      await send('/api/test', { invoice_id: 123 }, { trackErrors: 'all' });
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toBeInstanceOf(UploadError);
+
+    const pending = await getPendingForms();
+    expect(pending[0]!.lastError).toEqual({
+      code: 'target_failed',
       message: '422 Error',
       httpStatus: 422,
     });
+  });
+
+  it('records lastError when status is in custom trackErrors list', async () => {
+    const { fn } = makeFetchMock(
+      () => new Response('forbidden', { status: 403 }),
+    );
+    globalThis.fetch = fn;
+
+    try {
+      await send('/api/test', { x: 1 }, { trackErrors: [401, 403] });
+    } catch {
+      /* expected */
+    }
+
+    const pending = await getPendingForms();
+    expect(pending[0]!.lastError?.httpStatus).toBe(403);
+  });
+
+  it('does not record lastError for aborted uploads even with trackErrors "all"', async () => {
+    const controller = new AbortController();
+    const { fn } = makeFetchMock(async () => {
+      controller.abort();
+      throw Object.assign(new Error('aborted'), { name: 'AbortError' });
+    });
+    globalThis.fetch = fn;
+
+    let caught: unknown;
+    try {
+      await send('/api/test', { x: 1 }, { trackErrors: 'all', signal: controller.signal });
+    } catch (err) {
+      caught = err;
+    }
+
+    const error = caught as UploadError;
+    expect(error.classification).toBe('abort');
+    expect(error.code).toBe('aborted');
+
+    const pending = await getPendingForms();
+    expect(pending[0]!.lastError).toBeUndefined();
   });
 
   it('does not create a snapshot when saveSnapshot is false', async () => {
