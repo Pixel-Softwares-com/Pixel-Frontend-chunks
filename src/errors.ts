@@ -69,7 +69,7 @@ export function shouldTrackError(
   if (classification === undefined) return false;
 
   if (trackErrors === 'all') return true;
-  if (classification === 'abort') return trackErrors === 'all';
+  if (classification === 'abort') return false;
 
   if (trackErrors === undefined) {
     return DEFAULT_TRACKED_ERRORS.includes(
