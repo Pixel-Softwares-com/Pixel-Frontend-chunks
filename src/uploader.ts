@@ -1,22 +1,45 @@
-import { sha256Hex } from './checksum';
-import { classifyTransportError, UploadError } from './errors';
+import { classifyTransportError, UploadError, uploadErrorFromResponse } from './errors';
+import { uploadChunkWithRetry, type ChunkRequestOptions } from './chunkUploader';
 import { Profiler } from './profiler';
 import type { Transport, TransportResponse } from './transport';
 import { isTransportOk } from './transport';
-import type { StartRequestBody, StartResponseBody, UploadErrorCode } from './types';
+import type { StartRequestBody, StartResponseBody } from './types';
+import { joinUrl, VERSION_HEADER, WIRE_VERSION } from './uploaderProtocol';
 
-export const WIRE_VERSION = '1';
-export const VERSION_HEADER = 'X-Pixel-Request-Chunks-Version';
+export { VERSION_HEADER, WIRE_VERSION };
 
-export interface UploaderOptions {
-  prefix: string;
+export interface UploaderOptions extends ChunkRequestOptions {
   concurrency: number;
-  retries: number;
-  retryDelay: number;
-  signal?: AbortSignal;
-  onChunkUploaded?: (bytes: number) => void;
-  transport: Transport;
+  onChunkUploaded?: (bytes: number, index: number) => void;
+  skipIndices?: ReadonlySet<number>;
   profiler?: Profiler;
+}
+
+export interface SessionStatus {
+  alive: boolean;
+  uploadedChunks?: number[];
+  totalChunks?: number;
+  expiresAt?: string;
+}
+
+export async function checkSession(
+  uploadId: string,
+  options: UploaderOptions,
+): Promise<SessionStatus> {
+  const response = await options.transport.request<SessionStatus>({
+    url: joinUrl(options.prefix, '/status/' + encodeURIComponent(uploadId)),
+    method: 'GET',
+    headers: {
+      Accept: 'application/json',
+      [VERSION_HEADER]: WIRE_VERSION,
+    },
+    body: null,
+    signal: options.signal,
+    responseType: 'json',
+  });
+
+  if (!isTransportOk(response) || !response.data) return { alive: false };
+  return response.data;
 }
 
 export async function startSession(
@@ -43,7 +66,7 @@ export async function startSession(
   }
 
   if (!isTransportOk(response)) {
-    throw errorFromResponse('start_failed', response);
+    throw uploadErrorFromResponse('start_failed', response);
   }
 
   if (response.data?.uploadId) {
@@ -58,11 +81,12 @@ export async function uploadChunks(
   chunks: Blob[],
   options: UploaderOptions,
 ): Promise<void> {
-  const total = chunks.length;
-  if (total === 0) return;
+  if (chunks.length === 0) return;
 
   options.profiler?.start('total.upload');
 
+  const totalBytes = chunks.reduce((sum, c) => sum + c.size, 0);
+  const workerCount = Math.max(1, Math.min(options.concurrency, chunks.length));
   let cursor = 0;
   let firstError: unknown = null;
 
@@ -73,10 +97,14 @@ export async function uploadChunks(
         return;
       }
       const i = cursor++;
-      if (i >= total) return;
+      if (i >= chunks.length) return;
+      if (options.skipIndices?.has(i)) {
+        options.onChunkUploaded?.(chunks[i]!.size, i);
+        continue;
+      }
       try {
-        await uploadOneChunkWithRetry(uploadId, i, chunks[i]!, options);
-        options.onChunkUploaded?.(chunks[i]!.size);
+        await runChunk(uploadId, i, chunks[i]!, options);
+        options.onChunkUploaded?.(chunks[i]!.size, i);
       } catch (err) {
         if (firstError === null) firstError = err;
         return;
@@ -84,16 +112,12 @@ export async function uploadChunks(
     }
   };
 
-  const workerCount = Math.max(1, Math.min(options.concurrency, total));
-  let totalBytes = 0;
-  for (const c of chunks) totalBytes += c.size;
-
   try {
     await Promise.all(Array.from({ length: workerCount }, () => worker()));
   } finally {
     options.profiler?.end('total.upload', {
       uploadId,
-      totalChunks: total,
+      totalChunks: chunks.length,
       sizeBytes: totalBytes,
       concurrency: workerCount,
       outcome: firstError === null ? 'ok' : 'failed',
@@ -106,113 +130,6 @@ export async function uploadChunks(
       cause: firstError,
       classification: classifyTransportError(firstError),
     });
-  }
-}
-
-async function uploadOneChunkWithRetry(
-  uploadId: string,
-  index: number,
-  chunk: Blob,
-  options: UploaderOptions,
-): Promise<void> {
-  const phase = 'chunk.upload';
-  const trackKey = `chunk.upload#${index}`;
-  options.profiler?.start(phase, trackKey);
-
-  let attempts = 0;
-  let outcome: 'ok' | 'duplicate' | 'failed' | 'aborted' = 'failed';
-  let lastStatus: number | undefined;
-
-  try {
-    const checksum = await sha256Hex(chunk);
-    let attempt = 0;
-    let delay = options.retryDelay;
-
-    while (true) {
-      if (options.signal?.aborted) {
-        outcome = 'aborted';
-        throw new UploadError('aborted', 'Upload aborted', {
-          chunkIndex: index,
-          classification: 'abort',
-        });
-      }
-
-      attempts = attempt + 1;
-      let response: TransportResponse | null = null;
-      let networkError: unknown = null;
-
-      try {
-        const form = new FormData();
-        form.append('uploadId', uploadId);
-        form.append('chunkIndex', String(index));
-        form.append('chunkChecksum', checksum);
-        form.append('chunk', chunk, `chunk_${index}`);
-
-        response = await options.transport.request({
-          url: joinUrl(options.prefix, '/chunk'),
-          method: 'POST',
-          headers: {
-            Accept: 'application/json',
-            [VERSION_HEADER]: WIRE_VERSION,
-          },
-          body: form,
-          signal: options.signal,
-          responseType: 'json',
-        });
-      } catch (err) {
-        networkError = err;
-      }
-
-      if (response !== null) {
-        lastStatus = response.status;
-        // 200 = accepted, 409 = idempotent duplicate (already received) — both success.
-        if (isTransportOk(response)) {
-          outcome = 'ok';
-          return;
-        }
-        if (response.status === 409) {
-          outcome = 'duplicate';
-          return;
-        }
-
-        const isRetryable =
-          response.status >= 500 || response.status === 408 || response.status === 429;
-
-        if (!isRetryable || attempt >= options.retries) {
-          throw errorFromResponse('chunk_failed', response, index);
-        }
-      } else if (networkError !== null) {
-        const classification = classifyTransportError(networkError);
-        if (classification === 'abort') {
-          outcome = 'aborted';
-          throw new UploadError('aborted', 'Upload aborted', {
-            chunkIndex: index,
-            classification: 'abort',
-            cause: networkError,
-          });
-        }
-        if (attempt >= options.retries) {
-          throw new UploadError(
-            'chunk_failed',
-            `Chunk ${index} failed after ${options.retries} retries`,
-            { chunkIndex: index, cause: networkError, classification },
-          );
-        }
-      }
-
-      await sleep(delay);
-      delay *= 2;
-      attempt++;
-    }
-  } finally {
-    options.profiler?.end(phase, {
-      uploadId,
-      chunkIndex: index,
-      sizeBytes: chunk.size,
-      attempts,
-      status: lastStatus,
-      outcome,
-    }, trackKey);
   }
 }
 
@@ -242,34 +159,33 @@ export async function completeSession(
   }
 }
 
-function joinUrl(prefix: string, path: string): string {
-  const trimmed = prefix.endsWith('/') ? prefix.slice(0, -1) : prefix;
-  return trimmed + path;
-}
+async function runChunk(
+  uploadId: string,
+  index: number,
+  chunk: Blob,
+  options: UploaderOptions,
+): Promise<void> {
+  const phase = 'chunk.upload';
+  const trackKey = `${phase}#${index}`;
+  options.profiler?.start(phase, trackKey);
 
-function errorFromResponse(
-  fallbackCode: UploadErrorCode,
-  response: TransportResponse,
-  chunkIndex?: number,
-): UploadError {
-  let code: UploadErrorCode = fallbackCode;
-  let message = `${response.status} ${response.statusText || 'Error'}`;
+  let outcome: 'ok' | 'duplicate' | 'failed' | 'aborted' = 'failed';
+  let attempts = 0;
+  let status: number | undefined;
 
-  const data = response.data as { error?: { code?: string; message?: string } } | null | undefined;
-  if (data && typeof data === 'object' && data.error) {
-    if (data.error.code) code = data.error.code as UploadErrorCode;
-    if (data.error.message) message = data.error.message;
+  try {
+    const report = await uploadChunkWithRetry(uploadId, index, chunk, options);
+    outcome = report.outcome;
+    attempts = report.attempts;
+    status = report.status;
+  } catch (err) {
+    if (err instanceof UploadError && err.code === 'aborted') outcome = 'aborted';
+    throw err;
+  } finally {
+    options.profiler?.end(
+      phase,
+      { uploadId, chunkIndex: index, sizeBytes: chunk.size, attempts, status, outcome },
+      trackKey,
+    );
   }
-
-  return new UploadError(
-    code,
-    message,
-    chunkIndex !== undefined
-      ? { response, chunkIndex, classification: response.status }
-      : { response, classification: response.status },
-  );
-}
-
-function sleep(ms: number): Promise<void> {
-  return new Promise(resolve => setTimeout(resolve, ms));
 }

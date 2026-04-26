@@ -1,21 +1,12 @@
-import { sha256Hex } from './checksum';
-import { sliceBlob } from './chunker';
-import { classifyTransportError, shouldTrackError, UploadError } from './errors';
 import { Profiler } from './profiler';
+import { resolveUrl } from './resolveUrl';
+import { sendChunked, sendDirect, type ChunkedSendOptions } from './sendChunked';
 import { serialize } from './serialize';
-import { createSnapshot, deletePendingForm, recordSnapshotError } from './storage';
+import { createSnapshot } from './storage';
+import { finalizeResponse, preserveSnapshotOnError } from './snapshotOutcome';
 import { createFetchTransport } from './transports/fetch';
-import { isTransportOk, type Transport, type TransportResponse } from './transport';
-import { completeSession, startSession, uploadChunks, type UploaderOptions } from './uploader';
-import type {
-  ErrorClassification,
-  SendData,
-  SendOptions,
-  SnapshotLastError,
-  StartRequestBody,
-  TrackErrorsOption,
-  UploadErrorCode,
-} from './types';
+import { type Transport, type TransportResponse } from './transport';
+import type { SendData, SendOptions } from './types';
 
 export const DEFAULTS = {
   chunkSize: 1024 * 1024,
@@ -34,19 +25,16 @@ export interface ChunkDecisionInput {
   maxFormDataEntries: number;
 }
 
-interface ResolvedSendOptions extends ChunkDecisionInput {
+interface ResolvedSend extends SendOptions {
   chunkSize: number;
+  chunkThresholdBytes: number;
+  maxFormDataEntries: number;
   concurrency: number;
   retries: number;
   retryDelay: number;
   prefix: string;
   saveSnapshot: boolean;
   snapshotTTL: number;
-  signal?: AbortSignal;
-  trackErrors?: TrackErrorsOption;
-  onProgress?: (sent: number, total: number) => void;
-  transport: Transport;
-  profiler: Profiler;
 }
 
 let defaultTransport: Transport | null = null;
@@ -82,12 +70,7 @@ export async function send<T = unknown>(
     printTable: Boolean(options.profile) && typeof options.onProfile !== 'function',
   });
 
-  const merged: ResolvedSendOptions = {
-    ...DEFAULTS,
-    ...options,
-    transport: options.transport ?? getDefaultTransport(),
-    profiler,
-  };
+  const merged: ResolvedSend = { ...DEFAULTS, ...options };
   const method = options.method ?? 'POST';
   const userHeaders = options.headers ?? {};
   const resolvedUrl = resolveUrl(url, options.baseUrl);
@@ -96,205 +79,53 @@ export async function send<T = unknown>(
   let outcome: 'ok' | 'failed' = 'failed';
 
   const { blob, contentType, formDataEntryCount } = await serialize(data);
-  const snapshotId = merged.saveSnapshot
-    ? await createSnapshot({
-        targetUrl: resolvedUrl,
-        method,
-        headers: userHeaders,
-        contentType,
-        data,
-        ttlMs: merged.snapshotTTL,
-      })
-    : undefined;
+  const snapshotId = await ensureSnapshot(merged, resolvedUrl, method, userHeaders, contentType, data);
+
+  const chunked: ChunkedSendOptions = {
+    chunkSize: merged.chunkSize,
+    concurrency: merged.concurrency,
+    retries: merged.retries,
+    retryDelay: merged.retryDelay,
+    prefix: merged.prefix,
+    signal: options.signal,
+    onProgress: options.onProgress,
+    transport: options.transport ?? getDefaultTransport(),
+    profiler,
+  };
 
   try {
     const response = !shouldChunk(blob.size, formDataEntryCount, merged)
-      ? await sendDirect<T>(resolvedUrl, method, userHeaders, blob, contentType, merged)
-      : await sendChunked<T>(resolvedUrl, method, userHeaders, blob, contentType, merged);
+      ? await sendDirect<T>(resolvedUrl, method, userHeaders, blob, contentType, chunked)
+      : await sendChunked<T>(resolvedUrl, method, userHeaders, blob, contentType, chunked, snapshotId);
 
-    const finalized = await finalizeResponse(response, snapshotId, merged.trackErrors);
+    const finalized = await finalizeResponse(response, snapshotId, options.trackErrors);
     outcome = 'ok';
     return finalized;
   } catch (err) {
-    throw await preserveSnapshotOnError(err, snapshotId, merged.trackErrors);
+    throw await preserveSnapshotOnError(err, snapshotId, options.trackErrors);
   } finally {
     profiler.end('total', { sizeBytes: blob.size, outcome });
     profiler.flush();
   }
 }
 
-function resolveUrl(url: string, baseUrl: string | undefined): string {
-  if (/^https?:\/\//i.test(url)) return url;
-  if (baseUrl !== undefined) {
-    try {
-      return new URL(url, baseUrl).toString();
-    } catch {
-      return url;
-    }
-  }
-  if (typeof window !== 'undefined' && window.location) {
-    try {
-      return new URL(url, window.location.origin).toString();
-    } catch {
-      return url;
-    }
-  }
-  return url;
-}
-
-async function sendDirect<T>(
-  url: string,
+async function ensureSnapshot(
+  merged: ResolvedSend,
+  targetUrl: string,
   method: string,
-  userHeaders: Record<string, string>,
-  blob: Blob,
+  headers: Record<string, string>,
   contentType: string,
-  options: ResolvedSendOptions,
-): Promise<TransportResponse<T>> {
-  return options.transport.request<T>({
-    url,
-    method,
-    headers: {
-      ...userHeaders,
-      'Content-Type': contentType,
-    },
-    body: blob,
-    signal: options.signal,
-    onUploadProgress: options.onProgress,
-  });
-}
+  data: SendData,
+): Promise<string | undefined> {
+  if (merged.resumeSnapshotId) return merged.resumeSnapshotId;
+  if (!merged.saveSnapshot) return undefined;
 
-async function sendChunked<T>(
-  url: string,
-  method: string,
-  userHeaders: Record<string, string>,
-  blob: Blob,
-  contentType: string,
-  options: ResolvedSendOptions,
-): Promise<TransportResponse<T>> {
-  const chunks = sliceBlob(blob, options.chunkSize);
-  const fullChecksum = await sha256Hex(blob);
-
-  const startBody: StartRequestBody = {
-    targetUrl: url,
+  return createSnapshot({
+    targetUrl,
     method,
+    headers,
     contentType,
-    totalBytes: blob.size,
-    totalChunks: chunks.length,
-    chunkSize: options.chunkSize,
-    checksum: fullChecksum,
-    headers: userHeaders,
-  };
-
-  let sentBytes = 0;
-  const onProgress = options.onProgress;
-  const onChunkUploaded = onProgress
-    ? (bytes: number) => {
-        sentBytes += bytes;
-        onProgress(sentBytes, blob.size);
-      }
-    : undefined;
-
-  const uploaderOptions: UploaderOptions = {
-    prefix: options.prefix,
-    concurrency: options.concurrency,
-    retries: options.retries,
-    retryDelay: options.retryDelay,
-    signal: options.signal,
-    onChunkUploaded,
-    transport: options.transport,
-    profiler: options.profiler,
-  };
-
-  const { uploadId } = await startSession(startBody, uploaderOptions);
-  await uploadChunks(uploadId, chunks, uploaderOptions);
-  return (await completeSession(uploadId, uploaderOptions)) as TransportResponse<T>;
-}
-
-async function finalizeResponse<T>(
-  response: TransportResponse<T>,
-  snapshotId: string | undefined,
-  trackErrors: TrackErrorsOption | undefined,
-): Promise<TransportResponse<T>> {
-  if (isTransportOk(response)) {
-    if (snapshotId !== undefined) await deletePendingForm(snapshotId);
-    return response;
-  }
-
-  const error = errorFromResponse(response, snapshotId);
-  if (snapshotId !== undefined) {
-    if (shouldTrackError(error.classification, trackErrors)) {
-      await recordSnapshotError(snapshotId, lastErrorFromUploadError(error));
-    } else {
-      await deletePendingForm(snapshotId);
-    }
-  }
-
-  throw error;
-}
-
-async function preserveSnapshotOnError(
-  err: unknown,
-  snapshotId: string | undefined,
-  trackErrors: TrackErrorsOption | undefined,
-): Promise<Error> {
-  const error = toUploadError(err, snapshotId);
-  if (snapshotId !== undefined) {
-    if (shouldTrackError(error.classification, trackErrors)) {
-      await recordSnapshotError(snapshotId, lastErrorFromUploadError(error));
-    } else {
-      await deletePendingForm(snapshotId);
-    }
-  }
-
-  return error;
-}
-
-function errorFromResponse(
-  response: TransportResponse,
-  snapshotId: string | undefined,
-): UploadError {
-  let code: UploadErrorCode = 'target_failed';
-  let message = `${response.status} ${response.statusText || 'Error'}`;
-
-  const data = response.data as { error?: { code?: string; message?: string } } | null | undefined;
-  if (data && typeof data === 'object' && data.error) {
-    if (data.error.code) code = data.error.code as UploadErrorCode;
-    if (data.error.message) message = data.error.message;
-  }
-
-  return new UploadError(code, message, {
-    response,
-    snapshotId,
-    classification: response.status,
+    data,
+    ttlMs: merged.snapshotTTL,
   });
-}
-
-function toUploadError(err: unknown, snapshotId: string | undefined): UploadError {
-  if (err instanceof UploadError) {
-    const classification: ErrorClassification | undefined =
-      err.classification ?? (err.response ? err.response.status : classifyTransportError(err.cause));
-    return new UploadError(err.code, err.message, {
-      snapshotId,
-      response: err.response,
-      chunkIndex: err.chunkIndex,
-      classification,
-      cause: err,
-    });
-  }
-
-  const classification = classifyTransportError(err);
-  const code: UploadErrorCode = classification === 'abort' ? 'aborted' : 'target_failed';
-  return new UploadError(code, String((err as Error)?.message ?? err), {
-    snapshotId,
-    classification,
-    cause: err,
-  });
-}
-
-function lastErrorFromUploadError(error: UploadError): SnapshotLastError {
-  return {
-    code: error.code,
-    message: error.message,
-    ...(error.response !== undefined ? { httpStatus: error.response.status } : {}),
-  };
 }

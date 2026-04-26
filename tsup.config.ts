@@ -9,4 +9,8 @@ export default defineConfig({
   target: 'es2020',
   splitting: false,
   treeshake: true,
+  esbuildOptions(options) {
+    options.pure = ['console.log', 'console.debug', 'console.info'];
+    options.drop = ['debugger'];
+  },
 });

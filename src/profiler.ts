@@ -128,7 +128,6 @@ export class Profiler {
 
     if (this.printTable && !this.onProfile) {
       try {
-        // eslint-disable-next-line no-console
         console.table(
           snapshot.map(e => ({
             phase: e.phase,

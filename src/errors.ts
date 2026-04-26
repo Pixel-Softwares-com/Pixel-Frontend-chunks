@@ -1,5 +1,10 @@
 import type { TransportResponse } from './transport';
-import type { ErrorClassification, TrackErrorsOption, UploadErrorCode } from './types';
+import type {
+  ErrorClassification,
+  SnapshotLastError,
+  TrackErrorsOption,
+  UploadErrorCode,
+} from './types';
 import { DEFAULT_TRACKED_ERRORS } from './types';
 
 export interface UploadErrorOptions {
@@ -80,4 +85,55 @@ export function shouldTrackError(
   if (classification === 'network' || classification === 'cors') return true;
 
   return trackErrors.includes(classification as number | 'network' | 'cors' | 'timeout');
+}
+
+export function uploadErrorFromResponse(
+  fallbackCode: UploadErrorCode,
+  response: TransportResponse,
+  context: { snapshotId?: string; chunkIndex?: number } = {},
+): UploadError {
+  let code: UploadErrorCode = fallbackCode;
+  let message = `${response.status} ${response.statusText || 'Error'}`;
+
+  const data = response.data as { error?: { code?: string; message?: string } } | null | undefined;
+  if (data?.error) {
+    if (data.error.code) code = data.error.code as UploadErrorCode;
+    if (data.error.message) message = data.error.message;
+  }
+
+  return new UploadError(code, message, {
+    response,
+    classification: response.status,
+    ...context,
+  });
+}
+
+export function toUploadError(err: unknown, snapshotId?: string): UploadError {
+  if (err instanceof UploadError) {
+    const classification: ErrorClassification | undefined =
+      err.classification ?? (err.response ? err.response.status : classifyTransportError(err.cause));
+    return new UploadError(err.code, err.message, {
+      snapshotId,
+      response: err.response,
+      chunkIndex: err.chunkIndex,
+      classification,
+      cause: err,
+    });
+  }
+
+  const classification = classifyTransportError(err);
+  const code: UploadErrorCode = classification === 'abort' ? 'aborted' : 'target_failed';
+  return new UploadError(code, String((err as Error)?.message ?? err), {
+    snapshotId,
+    classification,
+    cause: err,
+  });
+}
+
+export function lastErrorFromUploadError(error: UploadError): SnapshotLastError {
+  return {
+    code: error.code,
+    message: error.message,
+    ...(error.response !== undefined ? { httpStatus: error.response.status } : {}),
+  };
 }

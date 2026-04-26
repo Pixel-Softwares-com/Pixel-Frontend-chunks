@@ -35,6 +35,8 @@ export interface SendOptions {
   saveSnapshot?: boolean;
   snapshotTTL?: number;
 
+  resumeSnapshotId?: string;
+
   trackErrors?: TrackErrorsOption;
 
   onProgress?: (sent: number, total: number) => void;

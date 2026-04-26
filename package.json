@@ -1,6 +1,6 @@
 {
   "name": "pixel-request-chunks",
-  "version": "0.4.1",
+  "version": "0.5.0",
   "description": "Transport-level chunking for HTTP requests with form snapshots and recovery.",
   "license": "MIT",
   "repository": {
