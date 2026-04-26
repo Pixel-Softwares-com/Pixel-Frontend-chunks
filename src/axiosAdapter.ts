@@ -119,6 +119,8 @@ function resolveSendOptions(defaults: SendOptions, config: AxiosAdapterRequestCo
     prefix: config.prefix ?? defaults.prefix ?? DEFAULTS.prefix,
     saveSnapshot: config.saveSnapshot ?? defaults.saveSnapshot ?? DEFAULTS.saveSnapshot,
     snapshotTTL: config.snapshotTTL ?? defaults.snapshotTTL ?? DEFAULTS.snapshotTTL,
+    baseUrl: config.baseURL ?? defaults.baseUrl,
+    trackErrors: config.trackErrors ?? defaults.trackErrors,
   };
 }
 
