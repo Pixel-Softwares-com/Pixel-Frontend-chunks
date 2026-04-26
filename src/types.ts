@@ -1,3 +1,4 @@
+import type { ProfileEntry } from './profiler';
 import type { Transport } from './transport';
 
 export interface SendOptions {
@@ -20,6 +21,10 @@ export interface SendOptions {
   onProgress?: (sent: number, total: number) => void;
 
   transport?: Transport;
+
+  profile?: boolean;
+  onProfile?: (entries: ProfileEntry[]) => void;
+  traceId?: string;
 }
 
 export type SendData =

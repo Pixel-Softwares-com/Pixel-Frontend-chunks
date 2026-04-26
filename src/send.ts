@@ -1,6 +1,7 @@
 import { sha256Hex } from './checksum';
 import { sliceBlob } from './chunker';
 import { UploadError } from './errors';
+import { Profiler } from './profiler';
 import { serialize } from './serialize';
 import { createSnapshot, deletePendingForm, recordSnapshotError } from './storage';
 import { createFetchTransport } from './transports/fetch';
@@ -36,6 +37,7 @@ interface ResolvedSendOptions extends ChunkDecisionInput {
   signal?: AbortSignal;
   onProgress?: (sent: number, total: number) => void;
   transport: Transport;
+  profiler: Profiler;
 }
 
 let defaultTransport: Transport | null = null;
@@ -64,13 +66,24 @@ export async function send<T = unknown>(
   data: SendData,
   options: SendOptions = {},
 ): Promise<TransportResponse<T>> {
+  const profiler = new Profiler({
+    enabled: Boolean(options.profile) || typeof options.onProfile === 'function',
+    traceId: options.traceId,
+    onProfile: options.onProfile,
+    printTable: Boolean(options.profile) && typeof options.onProfile !== 'function',
+  });
+
   const merged: ResolvedSendOptions = {
     ...DEFAULTS,
     ...options,
     transport: options.transport ?? getDefaultTransport(),
+    profiler,
   };
   const method = options.method ?? 'POST';
   const userHeaders = options.headers ?? {};
+
+  profiler.start('total');
+  let outcome: 'ok' | 'failed' = 'failed';
 
   const { blob, contentType, formDataEntryCount } = await serialize(data);
   const snapshotId = merged.saveSnapshot
@@ -89,9 +102,14 @@ export async function send<T = unknown>(
       ? await sendDirect<T>(url, method, userHeaders, blob, contentType, merged)
       : await sendChunked<T>(url, method, userHeaders, blob, contentType, merged);
 
-    return await finalizeResponse(response, snapshotId);
+    const finalized = await finalizeResponse(response, snapshotId);
+    outcome = 'ok';
+    return finalized;
   } catch (err) {
     throw await preserveSnapshotOnError(err, snapshotId);
+  } finally {
+    profiler.end('total', { sizeBytes: blob.size, outcome });
+    profiler.flush();
   }
 }
 
@@ -155,6 +173,7 @@ async function sendChunked<T>(
     signal: options.signal,
     onChunkUploaded,
     transport: options.transport,
+    profiler: options.profiler,
   };
 
   const { uploadId } = await startSession(startBody, uploaderOptions);

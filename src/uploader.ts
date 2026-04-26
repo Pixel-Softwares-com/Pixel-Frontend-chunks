@@ -1,5 +1,6 @@
 import { sha256Hex } from './checksum';
 import { UploadError } from './errors';
+import { Profiler } from './profiler';
 import type { Transport, TransportResponse } from './transport';
 import { isTransportOk } from './transport';
 import type { StartRequestBody, StartResponseBody, UploadErrorCode } from './types';
@@ -15,27 +16,38 @@ export interface UploaderOptions {
   signal?: AbortSignal;
   onChunkUploaded?: (bytes: number) => void;
   transport: Transport;
+  profiler?: Profiler;
 }
 
 export async function startSession(
   body: StartRequestBody,
   options: UploaderOptions,
 ): Promise<StartResponseBody> {
-  const response = await options.transport.request<StartResponseBody>({
-    url: joinUrl(options.prefix, '/start'),
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Accept: 'application/json',
-      [VERSION_HEADER]: WIRE_VERSION,
-    },
-    body: JSON.stringify(body),
-    signal: options.signal,
-    responseType: 'json',
-  });
+  options.profiler?.start('start');
+  let response: TransportResponse<StartResponseBody>;
+  try {
+    response = await options.transport.request<StartResponseBody>({
+      url: joinUrl(options.prefix, '/start'),
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Accept: 'application/json',
+        [VERSION_HEADER]: WIRE_VERSION,
+      },
+      body: JSON.stringify(body),
+      signal: options.signal,
+      responseType: 'json',
+    });
+  } finally {
+    options.profiler?.end('start', { totalBytes: body.totalBytes, totalChunks: body.totalChunks });
+  }
 
   if (!isTransportOk(response)) {
     throw errorFromResponse('start_failed', response);
+  }
+
+  if (response.data?.uploadId) {
+    options.profiler?.setUploadId(response.data.uploadId);
   }
 
   return response.data;
@@ -48,6 +60,8 @@ export async function uploadChunks(
 ): Promise<void> {
   const total = chunks.length;
   if (total === 0) return;
+
+  options.profiler?.start('total.upload');
 
   let cursor = 0;
   let firstError: unknown = null;
@@ -71,7 +85,20 @@ export async function uploadChunks(
   };
 
   const workerCount = Math.max(1, Math.min(options.concurrency, total));
-  await Promise.all(Array.from({ length: workerCount }, () => worker()));
+  let totalBytes = 0;
+  for (const c of chunks) totalBytes += c.size;
+
+  try {
+    await Promise.all(Array.from({ length: workerCount }, () => worker()));
+  } finally {
+    options.profiler?.end('total.upload', {
+      uploadId,
+      totalChunks: total,
+      sizeBytes: totalBytes,
+      concurrency: workerCount,
+      outcome: firstError === null ? 'ok' : 'failed',
+    });
+  }
 
   if (firstError !== null) {
     if (firstError instanceof UploadError) throw firstError;
@@ -87,63 +114,92 @@ async function uploadOneChunkWithRetry(
   chunk: Blob,
   options: UploaderOptions,
 ): Promise<void> {
-  const checksum = await sha256Hex(chunk);
-  let attempt = 0;
-  let delay = options.retryDelay;
+  const phase = 'chunk.upload';
+  const trackKey = `chunk.upload#${index}`;
+  options.profiler?.start(phase, trackKey);
 
-  while (true) {
-    if (options.signal?.aborted) {
-      throw new UploadError('aborted', 'Upload aborted', { chunkIndex: index });
-    }
+  let attempts = 0;
+  let outcome: 'ok' | 'duplicate' | 'failed' | 'aborted' = 'failed';
+  let lastStatus: number | undefined;
 
-    let response: TransportResponse | null = null;
-    let networkError: unknown = null;
+  try {
+    const checksum = await sha256Hex(chunk);
+    let attempt = 0;
+    let delay = options.retryDelay;
 
-    try {
-      const form = new FormData();
-      form.append('uploadId', uploadId);
-      form.append('chunkIndex', String(index));
-      form.append('chunkChecksum', checksum);
-      form.append('chunk', chunk, `chunk_${index}`);
-
-      response = await options.transport.request({
-        url: joinUrl(options.prefix, '/chunk'),
-        method: 'POST',
-        headers: {
-          Accept: 'application/json',
-          [VERSION_HEADER]: WIRE_VERSION,
-        },
-        body: form,
-        signal: options.signal,
-        responseType: 'json',
-      });
-    } catch (err) {
-      networkError = err;
-    }
-
-    if (response !== null) {
-      // 200 = accepted, 409 = idempotent duplicate (already received) — both success.
-      if (isTransportOk(response) || response.status === 409) return;
-
-      const isRetryable =
-        response.status >= 500 || response.status === 408 || response.status === 429;
-
-      if (!isRetryable || attempt >= options.retries) {
-        throw errorFromResponse('chunk_failed', response, index);
+    while (true) {
+      if (options.signal?.aborted) {
+        outcome = 'aborted';
+        throw new UploadError('aborted', 'Upload aborted', { chunkIndex: index });
       }
-    } else if (networkError !== null) {
-      if (attempt >= options.retries) {
-        throw new UploadError(
-          'chunk_failed',
-          `Chunk ${index} failed after ${options.retries} retries`,
-          { chunkIndex: index, cause: networkError },
-        );
-      }
-    }
 
-    await sleep(delay);
-    delay *= 2;
-    attempt++;
+      attempts = attempt + 1;
+      let response: TransportResponse | null = null;
+      let networkError: unknown = null;
+
+      try {
+        const form = new FormData();
+        form.append('uploadId', uploadId);
+        form.append('chunkIndex', String(index));
+        form.append('chunkChecksum', checksum);
+        form.append('chunk', chunk, `chunk_${index}`);
+
+        response = await options.transport.request({
+          url: joinUrl(options.prefix, '/chunk'),
+          method: 'POST',
+          headers: {
+            Accept: 'application/json',
+            [VERSION_HEADER]: WIRE_VERSION,
+          },
+          body: form,
+          signal: options.signal,
+          responseType: 'json',
+        });
+      } catch (err) {
+        networkError = err;
+      }
+
+      if (response !== null) {
+        lastStatus = response.status;
+        // 200 = accepted, 409 = idempotent duplicate (already received) — both success.
+        if (isTransportOk(response)) {
+          outcome = 'ok';
+          return;
+        }
+        if (response.status === 409) {
+          outcome = 'duplicate';
+          return;
+        }
+
+        const isRetryable =
+          response.status >= 500 || response.status === 408 || response.status === 429;
+
+        if (!isRetryable || attempt >= options.retries) {
+          throw errorFromResponse('chunk_failed', response, index);
+        }
+      } else if (networkError !== null) {
+        if (attempt >= options.retries) {
+          throw new UploadError(
+            'chunk_failed',
+            `Chunk ${index} failed after ${options.retries} retries`,
+            { chunkIndex: index, cause: networkError },
+          );
+        }
+      }
+
+      await sleep(delay);
+      delay *= 2;
+      attempt++;
+    }
+  } finally {
+    options.profiler?.end(phase, {
+      uploadId,
+      chunkIndex: index,
+      sizeBytes: chunk.size,
+      attempts,
+      status: lastStatus,
+      outcome,
+    }, trackKey);
   }
 }
 
@@ -151,16 +207,26 @@ export async function completeSession(
   uploadId: string,
   options: UploaderOptions,
 ): Promise<TransportResponse> {
-  return options.transport.request({
-    url: joinUrl(options.prefix, '/complete'),
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      [VERSION_HEADER]: WIRE_VERSION,
-    },
-    body: JSON.stringify({ uploadId }),
-    signal: options.signal,
-  });
+  options.profiler?.start('complete.duration');
+  let status: number | undefined;
+  let outcome: 'ok' | 'failed' = 'failed';
+  try {
+    const response = await options.transport.request({
+      url: joinUrl(options.prefix, '/complete'),
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        [VERSION_HEADER]: WIRE_VERSION,
+      },
+      body: JSON.stringify({ uploadId }),
+      signal: options.signal,
+    });
+    status = response.status;
+    outcome = isTransportOk(response) ? 'ok' : 'failed';
+    return response;
+  } finally {
+    options.profiler?.end('complete.duration', { uploadId, status, outcome });
+  }
 }
 
 function joinUrl(prefix: string, path: string): string {
