@@ -38,7 +38,7 @@ export async function sendDirect<T>(
   return options.transport.request<T>({
     url,
     method,
-    headers: { ...userHeaders, 'Content-Type': contentType },
+    headers: {'Content-Type': contentType ,  ...userHeaders },
     body: blob,
     signal: options.signal,
     onUploadProgress: options.onProgress,
