@@ -1,5 +1,3 @@
-import { sha256Hex } from './checksum';
-import { sliceBlob } from './chunker';
 import { createProgressFlusher } from './progressFlusher';
 import {
   readSnapshotUploadProgress,
@@ -51,19 +49,18 @@ export async function sendChunked<T>(
   url: string,
   method: string,
   userHeaders: Record<string, string>,
-  blob: Blob,
+  chunks: Blob[],
+  totalBytes: number,
   contentType: string,
+  fullChecksum: string,
   options: ChunkedSendOptions,
   snapshotId: string | undefined,
 ): Promise<TransportResponse<T>> {
-  const chunks = sliceBlob(blob, options.chunkSize);
-  const fullChecksum = await sha256Hex(blob);
-
   const startBody: StartRequestBody = {
     targetUrl: url,
     method,
     contentType,
-    totalBytes: blob.size,
+    totalBytes,
     totalChunks: chunks.length,
     chunkSize: options.chunkSize,
     checksum: fullChecksum,
@@ -82,7 +79,6 @@ export async function sendChunked<T>(
 
   const { uploadId, resumed } = await resolveUploadSession(
     snapshotId,
-    fullChecksum,
     chunks.length,
     options.chunkSize,
     startBody,
@@ -104,7 +100,7 @@ export async function sendChunked<T>(
   }
 
   if (options.onProgress && skippedBytes > 0) {
-    options.onProgress(skippedBytes, blob.size);
+    options.onProgress(skippedBytes, totalBytes);
   }
 
   const flusher = snapshotId !== undefined
@@ -115,7 +111,7 @@ export async function sendChunked<T>(
     if (uploadedSet.has(index)) return;
     uploadedSet.add(index);
     sentBytes += bytes;
-    options.onProgress?.(sentBytes, blob.size);
+    options.onProgress?.(sentBytes, totalBytes);
     flusher?.schedule();
   };
 
@@ -137,13 +133,12 @@ export async function sendChunked<T>(
 
 async function resolveUploadSession(
   snapshotId: string | undefined,
-  fullChecksum: string,
   totalChunks: number,
   chunkSize: number,
   startBody: StartRequestBody,
   uploaderOptions: UploaderOptions,
 ): Promise<{ uploadId: string; resumed: number[] }> {
-  const resumed = await tryResume(snapshotId, fullChecksum, totalChunks, chunkSize, uploaderOptions);
+  const resumed = await tryResume(snapshotId, totalChunks, chunkSize, uploaderOptions);
   if (resumed !== null) return resumed;
 
   const { uploadId } = await startSession(startBody, uploaderOptions);
@@ -152,7 +147,6 @@ async function resolveUploadSession(
 
 async function tryResume(
   snapshotId: string | undefined,
-  fullChecksum: string,
   totalChunks: number,
   chunkSize: number,
   uploaderOptions: UploaderOptions,
@@ -162,7 +156,6 @@ async function tryResume(
   const prior = await readSnapshotUploadProgress(snapshotId);
   if (
     !prior?.uploadId ||
-    prior.fullChecksum !== fullChecksum ||
     prior.totalChunks !== totalChunks ||
     prior.chunkSize !== chunkSize
   ) {

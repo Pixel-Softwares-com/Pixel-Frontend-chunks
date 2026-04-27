@@ -1,8 +1,10 @@
+import { sha256Hex } from './checksum';
+import { sliceBlob } from './chunker';
 import { Profiler } from './profiler';
 import { resolveUrl } from './resolveUrl';
 import { sendChunked, sendDirect, type ChunkedSendOptions } from './sendChunked';
 import { serialize } from './serialize';
-import { createSnapshot } from './storage';
+import { createSnapshot, readSnapshotBlob, restoreForm } from './storage';
 import { finalizeResponse, preserveSnapshotOnError } from './snapshotOutcome';
 import { createFetchTransport } from './transports/fetch';
 import { type Transport, type TransportResponse } from './transport';
@@ -78,8 +80,23 @@ export async function send<T = unknown>(
   profiler.start('total');
   let outcome: 'ok' | 'failed' = 'failed';
 
-  const { blob, contentType, formDataEntryCount } = await serialize(data);
-  const snapshotId = await ensureSnapshot(merged, resolvedUrl, method, userHeaders, contentType, data);
+  const { blob, contentType, formDataEntryCount } = await resolvePayload(
+    data,
+    merged.resumeSnapshotId,
+  );
+  const chunks = sliceBlob(blob, merged.chunkSize);
+  const fullChecksum = await sha256Hex(blob);
+
+  const snapshotId = await ensureSnapshot(
+    merged,
+    resolvedUrl,
+    method,
+    userHeaders,
+    contentType,
+    chunks,
+    blob.size,
+    fullChecksum,
+  );
 
   const chunked: ChunkedSendOptions = {
     chunkSize: merged.chunkSize,
@@ -96,7 +113,17 @@ export async function send<T = unknown>(
   try {
     const response = !shouldChunk(blob.size, formDataEntryCount, merged)
       ? await sendDirect<T>(resolvedUrl, method, userHeaders, blob, contentType, chunked)
-      : await sendChunked<T>(resolvedUrl, method, userHeaders, blob, contentType, chunked, snapshotId);
+      : await sendChunked<T>(
+          resolvedUrl,
+          method,
+          userHeaders,
+          chunks,
+          blob.size,
+          contentType,
+          fullChecksum,
+          chunked,
+          snapshotId,
+        );
 
     const finalized = await finalizeResponse(response, snapshotId, options.trackErrors);
     outcome = 'ok';
@@ -109,13 +136,31 @@ export async function send<T = unknown>(
   }
 }
 
+async function resolvePayload(
+  data: SendData,
+  resumeSnapshotId: string | undefined,
+): Promise<{ blob: Blob; contentType: string; formDataEntryCount: number | null }> {
+  if (resumeSnapshotId) {
+    const [blob, form] = await Promise.all([
+      readSnapshotBlob(resumeSnapshotId),
+      restoreForm(resumeSnapshotId),
+    ]);
+    if (blob && form) {
+      return { blob, contentType: form.contentType, formDataEntryCount: null };
+    }
+  }
+  return serialize(data);
+}
+
 async function ensureSnapshot(
   merged: ResolvedSend,
   targetUrl: string,
   method: string,
   headers: Record<string, string>,
   contentType: string,
-  data: SendData,
+  chunks: Blob[],
+  totalBytes: number,
+  fullChecksum: string,
 ): Promise<string | undefined> {
   if (merged.resumeSnapshotId) return merged.resumeSnapshotId;
   if (!merged.saveSnapshot) return undefined;
@@ -125,7 +170,10 @@ async function ensureSnapshot(
     method,
     headers,
     contentType,
-    data,
+    chunks,
+    chunkSize: merged.chunkSize,
+    totalBytes,
+    fullChecksum,
     ttlMs: merged.snapshotTTL,
   });
 }

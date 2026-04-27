@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { sha256Hex } from '../src/checksum';
+import { sliceBlob } from '../src/chunker';
 import { send } from '../src/send';
 import {
   clearAllPending,
@@ -8,6 +9,20 @@ import {
   readSnapshotUploadProgress,
   recordSnapshotUploadProgress,
 } from '../src/storage';
+
+async function snapshotForBlob(blob: Blob, chunkSize: number, targetUrl = '/api/upload'): Promise<string> {
+  return createSnapshot({
+    targetUrl,
+    method: 'POST',
+    headers: {},
+    contentType: 'application/octet-stream',
+    chunks: sliceBlob(blob, chunkSize),
+    chunkSize,
+    totalBytes: blob.size,
+    fullChecksum: await sha256Hex(blob),
+    ttlMs: 24 * 60 * 60 * 1000,
+  });
+}
 
 interface FetchCall {
   url: string;
@@ -97,14 +112,7 @@ describe('resume', () => {
     const blob = new Blob([new Uint8Array(3 * 1024 * 1024)]);
     const fullChecksum = await sha256Hex(blob);
 
-    const snapshotId = await createSnapshot({
-      targetUrl: '/api/upload',
-      method: 'POST',
-      headers: {},
-      contentType: 'application/octet-stream',
-      data: blob,
-      ttlMs: 24 * 60 * 60 * 1000,
-    });
+    const snapshotId = await snapshotForBlob(blob, 1024 * 1024);
     await recordSnapshotUploadProgress(snapshotId, {
       uploadId: 'session-A',
       uploadedChunkIndices: [0],
@@ -179,14 +187,7 @@ describe('resume', () => {
     const blob = new Blob([new Uint8Array(3 * 1024 * 1024)]);
     const fullChecksum = await sha256Hex(blob);
 
-    const snapshotId = await createSnapshot({
-      targetUrl: '/api/upload',
-      method: 'POST',
-      headers: {},
-      contentType: 'application/octet-stream',
-      data: blob,
-      ttlMs: 24 * 60 * 60 * 1000,
-    });
+    const snapshotId = await snapshotForBlob(blob, 1024 * 1024);
     await recordSnapshotUploadProgress(snapshotId, {
       uploadId: 'session-DEAD',
       uploadedChunkIndices: [0],

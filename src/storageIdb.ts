@@ -1,7 +1,6 @@
 const DB_NAME = 'pixel-request-chunks';
 const DB_VERSION = 1;
 export const SNAPSHOTS_STORE = 'snapshots';
-export const UPLOADS_STORE = 'uploads';
 
 let dbPromise: Promise<IDBDatabase> | null = null;
 
@@ -17,9 +16,6 @@ export function openDatabase(): Promise<IDBDatabase> {
       const db = request.result;
       if (!db.objectStoreNames.contains(SNAPSHOTS_STORE)) {
         db.createObjectStore(SNAPSHOTS_STORE, { keyPath: 'snapshotId' });
-      }
-      if (!db.objectStoreNames.contains(UPLOADS_STORE)) {
-        db.createObjectStore(UPLOADS_STORE, { keyPath: 'uploadId' });
       }
     };
 

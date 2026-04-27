@@ -42,5 +42,6 @@ export type {
   StartResponseBody,
   SnapshotLastError,
   PendingForm,
+  DecodedPayload,
 } from './types';
 export { DEFAULT_TRACKED_ERRORS } from './types';

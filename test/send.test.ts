@@ -207,7 +207,9 @@ describe('send (decision routing)', () => {
     expect(pending).toHaveLength(1);
     expect(pending[0]!.snapshotId).toBe(error.snapshotId);
     expect(pending[0]!.targetUrl).toBe('/api/test');
-    expect(pending[0]!.fields.json).toBe(JSON.stringify({ invoice_id: 123 }));
+    const decoded = await pending[0]!.getPayload();
+    expect(decoded.kind).toBe('json');
+    expect(decoded.kind === 'json' ? decoded.data : null).toEqual({ invoice_id: 123 });
     expect(pending[0]!.lastError).toEqual({
       code: 'target_failed',
       message: '500 Error',

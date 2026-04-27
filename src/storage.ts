@@ -1,13 +1,11 @@
-import type { PendingForm, SendData, SnapshotLastError } from './types';
+import type { DecodedPayload, PendingForm, SnapshotLastError } from './types';
 import {
   clearStore,
   hasIndexedDB,
   openDatabase,
   requestToPromise,
   SNAPSHOTS_STORE,
-  UPLOADS_STORE,
 } from './storageIdb';
-import { createSnapshotId, extractPayload } from './storagePayload';
 
 interface SnapshotRecord {
   snapshotId: string;
@@ -18,13 +16,13 @@ interface SnapshotRecord {
   createdAt: number;
   expiresAt: number;
   lastError?: SnapshotLastError;
-  fields: Record<string, string>;
-  files: Record<string, File>;
+  chunks: Blob[];
+  totalChunks: number;
+  chunkSize: number;
+  totalBytes: number;
+  fullChecksum: string;
   uploadId?: string;
   uploadedChunkIndices?: number[];
-  totalChunks?: number;
-  chunkSize?: number;
-  fullChecksum?: string;
 }
 
 export interface SnapshotUploadProgress {
@@ -40,7 +38,10 @@ export interface CreateSnapshotInput {
   method: string;
   headers: Record<string, string>;
   contentType: string;
-  data: SendData;
+  chunks: Blob[];
+  chunkSize: number;
+  totalBytes: number;
+  fullChecksum: string;
   ttlMs: number;
 }
 
@@ -52,7 +53,6 @@ export async function createSnapshot(input: CreateSnapshotInput): Promise<string
 
   const now = Date.now();
   const snapshotId = createSnapshotId();
-  const { fields, files } = extractPayload(input.data);
 
   await putSnapshot({
     snapshotId,
@@ -62,8 +62,11 @@ export async function createSnapshot(input: CreateSnapshotInput): Promise<string
     contentType: input.contentType,
     createdAt: nextCreatedAt(now),
     expiresAt: now + input.ttlMs,
-    fields,
-    files,
+    chunks: input.chunks,
+    totalChunks: input.chunks.length,
+    chunkSize: input.chunkSize,
+    totalBytes: input.totalBytes,
+    fullChecksum: input.fullChecksum,
   });
 
   return snapshotId;
@@ -92,10 +95,7 @@ export async function clearAllPending(): Promise<void> {
   }
 
   const db = await openDatabase();
-  await Promise.all([
-    clearStore(db, SNAPSHOTS_STORE),
-    clearStore(db, UPLOADS_STORE),
-  ]);
+  await clearStore(db, SNAPSHOTS_STORE);
 }
 
 export async function recordSnapshotError(
@@ -127,6 +127,34 @@ export async function readSnapshotUploadProgress(
     chunkSize: record.chunkSize,
     fullChecksum: record.fullChecksum,
   };
+}
+
+/** Internal: reads the raw Blob of a snapshot (chunks reassembled). Used by
+ * the resume path to re-slice and re-upload without re-serializing, which
+ * would change FormData boundaries. */
+export async function readSnapshotBlob(snapshotId: string): Promise<Blob | null> {
+  const record = await getSnapshot(snapshotId);
+  if (record === undefined) return null;
+  return new Blob(record.chunks, { type: record.contentType });
+}
+
+async function decodeBlob(blob: Blob, contentType: string): Promise<DecodedPayload> {
+  const main = contentType.split(';', 1)[0]!.trim().toLowerCase();
+
+  if (main === 'multipart/form-data') {
+    const data = await new Response(blob, { headers: { 'Content-Type': contentType } }).formData();
+    return { kind: 'formData', contentType, data };
+  }
+
+  if (main === 'application/json') {
+    return { kind: 'json', contentType, data: JSON.parse(await blob.text()) };
+  }
+
+  if (main.startsWith('text/')) {
+    return { kind: 'text', contentType, data: await blob.text() };
+  }
+
+  return { kind: 'blob', contentType, data: blob };
 }
 
 async function purgeExpiredSnapshots(now = Date.now()): Promise<void> {
@@ -181,19 +209,34 @@ async function deleteSnapshot(snapshotId: string): Promise<void> {
 }
 
 function toPendingForm(record: SnapshotRecord): PendingForm {
+  const chunks = record.chunks;
+  const contentType = record.contentType;
   return {
-    ...record,
+    snapshotId: record.snapshotId,
+    targetUrl: record.targetUrl,
+    method: record.method,
     headers: { ...record.headers },
-    fields: { ...record.fields },
-    files: { ...record.files },
+    contentType: record.contentType,
     createdAt: new Date(record.createdAt),
     expiresAt: new Date(record.expiresAt),
+    lastError: record.lastError,
+    totalChunks: record.totalChunks,
+    chunkSize: record.chunkSize,
+    totalBytes: record.totalBytes,
+    getPayload: () => decodeBlob(new Blob(chunks, { type: contentType }), contentType),
   };
 }
 
 function nextCreatedAt(now: number): number {
   lastCreatedAt = Math.max(now, lastCreatedAt + 1);
   return lastCreatedAt;
+}
+
+function createSnapshotId(): string {
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+    return crypto.randomUUID();
+  }
+  return 'snapshot_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2);
 }
 
 if (typeof window !== 'undefined') {

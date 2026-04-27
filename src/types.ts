@@ -102,6 +102,12 @@ export interface SnapshotLastError {
   httpStatus?: number;
 }
 
+export type DecodedPayload =
+  | { kind: 'formData'; contentType: string; data: FormData }
+  | { kind: 'json'; contentType: string; data: unknown }
+  | { kind: 'text'; contentType: string; data: string }
+  | { kind: 'blob'; contentType: string; data: Blob };
+
 export interface PendingForm {
   snapshotId: string;
   targetUrl: string;
@@ -111,6 +117,10 @@ export interface PendingForm {
   createdAt: Date;
   expiresAt: Date;
   lastError?: SnapshotLastError;
-  fields: Record<string, string>;
-  files: Record<string, File>;
+  totalChunks: number;
+  chunkSize: number;
+  totalBytes: number;
+  /** Reassembles the chunks and decodes them back into the original payload
+   * shape (FormData, parsed JSON, string, or Blob) based on contentType. */
+  getPayload(): Promise<DecodedPayload>;
 }
