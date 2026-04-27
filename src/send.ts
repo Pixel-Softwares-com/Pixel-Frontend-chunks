@@ -111,7 +111,7 @@ export async function send<T = unknown>(
   };
 
   try {
-    const response = !shouldChunk(blob.size, formDataEntryCount, merged)
+    const response = merged.useChunk === false || !shouldChunk(blob.size, formDataEntryCount, merged)
       ? await sendDirect<T>(resolvedUrl, method, userHeaders, blob, contentType, chunked)
       : await sendChunked<T>(
           resolvedUrl,

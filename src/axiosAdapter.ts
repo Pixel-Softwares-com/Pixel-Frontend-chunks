@@ -113,6 +113,7 @@ function resolveSendOptions(defaults: SendOptions, config: AxiosAdapterRequestCo
     chunkSize: config.chunkSize ?? defaults.chunkSize ?? DEFAULTS.chunkSize,
     chunkThresholdBytes: config.chunkThresholdBytes ?? defaults.chunkThresholdBytes ?? DEFAULTS.chunkThresholdBytes,
     maxFormDataEntries: config.maxFormDataEntries ?? defaults.maxFormDataEntries ?? DEFAULTS.maxFormDataEntries,
+    useChunk: config.useChunk ?? defaults.useChunk,
     concurrency: config.concurrency ?? defaults.concurrency ?? DEFAULTS.concurrency,
     retries: config.retries ?? defaults.retries ?? DEFAULTS.retries,
     retryDelay: config.retryDelay ?? defaults.retryDelay ?? DEFAULTS.retryDelay,
