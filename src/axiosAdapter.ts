@@ -51,7 +51,20 @@ export function createChunkedAxiosAdapter(
   const getTransport = (baseURL = '') => {
     let transport = transports.get(baseURL);
     if (transport === undefined) {
-      transport = createAxiosTransport(axios.create({ baseURL }));
+      const instance = axios.create({ baseURL }) as AxiosLikeInstance & {
+        defaults?: { headers?: Record<string, Record<string, unknown>> };
+      };
+      const headers = instance.defaults?.headers;
+      if (headers) {
+        for (const method of ['common', 'post', 'put', 'patch', 'delete']) {
+          const bucket = headers[method];
+          if (bucket && typeof bucket === 'object') {
+            delete bucket['Content-Type'];
+            delete bucket['content-type'];
+          }
+        }
+      }
+      transport = createAxiosTransport(instance);
       transports.set(baseURL, transport);
     }
     return transport;
@@ -114,6 +127,7 @@ function resolveSendOptions(defaults: SendOptions, config: AxiosAdapterRequestCo
     chunkThresholdBytes: config.chunkThresholdBytes ?? defaults.chunkThresholdBytes ?? DEFAULTS.chunkThresholdBytes,
     maxFormDataEntries: config.maxFormDataEntries ?? defaults.maxFormDataEntries ?? DEFAULTS.maxFormDataEntries,
     useChunk: config.useChunk ?? defaults.useChunk,
+    useFormData: config.useFormData ?? defaults.useFormData,
     concurrency: config.concurrency ?? defaults.concurrency ?? DEFAULTS.concurrency,
     retries: config.retries ?? defaults.retries ?? DEFAULTS.retries,
     retryDelay: config.retryDelay ?? defaults.retryDelay ?? DEFAULTS.retryDelay,

@@ -31,15 +31,18 @@ export async function sendDirect<T>(
   url: string,
   method: string,
   userHeaders: Record<string, string>,
-  blob: Blob,
+  body: Blob | FormData,
   contentType: string,
   options: ChunkedSendOptions,
 ): Promise<TransportResponse<T>> {
+  const headers = contentType
+    ? { 'Content-Type': contentType, ...userHeaders }
+    : { ...userHeaders };
   return options.transport.request<T>({
     url,
     method,
-    headers: {'Content-Type': contentType ,  ...userHeaders },
-    body: blob,
+    headers,
+    body: body as Blob,
     signal: options.signal,
     onUploadProgress: options.onProgress,
   });

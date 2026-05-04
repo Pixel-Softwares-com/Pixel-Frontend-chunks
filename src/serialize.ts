@@ -1,51 +1,23 @@
 import type { SendData, SerializedPayload } from './types';
 
-export async function serialize(data: SendData): Promise<SerializedPayload> {
-  if (typeof FormData !== 'undefined' && data instanceof FormData) {
-    let count = 0;
-    for (const _ of data.keys()) count++;
-    const response = new Response(data);
-    const contentType = response.headers.get('Content-Type') ?? 'multipart/form-data';
-    const blob = await response.blob();
-    return { blob, contentType, formDataEntryCount: count };
-  }
-
-  if (typeof Blob !== 'undefined' && data instanceof Blob) {
+export async function serialize(
+  data: SendData,
+  options: { useFormData?: boolean } = {},
+): Promise<SerializedPayload> {
+  if (options.useFormData === false) {
+    const json = typeof data === 'string' ? data : JSON.stringify(data);
     return {
-      blob: data,
-      contentType: data.type || 'application/octet-stream',
+      blob: new Blob([json], { type: 'application/json' }),
+      contentType: 'application/json',
       formDataEntryCount: null,
     };
   }
 
-  if (data instanceof ArrayBuffer) {
-    return {
-      blob: new Blob([data], { type: 'application/octet-stream' }),
-      contentType: 'application/octet-stream',
-      formDataEntryCount: null,
-    };
-  }
-
-  if (ArrayBuffer.isView(data)) {
-    return {
-      blob: new Blob([data as BlobPart], { type: 'application/octet-stream' }),
-      contentType: 'application/octet-stream',
-      formDataEntryCount: null,
-    };
-  }
-
-  if (typeof data === 'string') {
-    return {
-      blob: new Blob([data], { type: 'text/plain;charset=utf-8' }),
-      contentType: 'text/plain;charset=utf-8',
-      formDataEntryCount: null,
-    };
-  }
-
-  const json = JSON.stringify(data);
-  return {
-    blob: new Blob([json], { type: 'application/json' }),
-    contentType: 'application/json',
-    formDataEntryCount: null,
-  };
+  const formData = data as FormData;
+  const response = new Response(formData);
+  const contentType = response.headers.get('Content-Type')!;
+  const blob = await response.blob();
+  let count = 0;
+  for (const _ of formData.keys()) count++;
+  return { blob, contentType, formDataEntryCount: count };
 }

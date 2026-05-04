@@ -14,6 +14,7 @@ export interface AxiosLikeRequestConfig {
   responseType?: 'json' | 'text' | 'blob' | 'arraybuffer' | 'stream' | 'document';
   onUploadProgress?: (event: AxiosLikeProgressEvent) => void;
   validateStatus?: ((status: number) => boolean) | null;
+  transformRequest?: Array<(data: unknown, headers?: unknown) => unknown>;
 }
 
 export interface AxiosLikeResponse<T = unknown> {
@@ -32,15 +33,20 @@ export interface AxiosLikeInstance {
 export function createAxiosTransport(instance: AxiosLikeInstance): Transport {
   return {
     async request<T>(req: TransportRequest): Promise<TransportResponse<T>> {
+      const isFormData = typeof FormData !== 'undefined' && req.body instanceof FormData;
+      const finalHeaders = normalizeHeaderCase(req.headers);
       const config: AxiosLikeRequestConfig = {
         url: req.url,
         method: req.method,
-        headers: req.headers,
+        headers: finalHeaders,
         data: req.body ?? undefined,
         signal: req.signal,
         responseType: mapResponseType(req.responseType),
         validateStatus: () => true,
       };
+      if (!isFormData) {
+        config.transformRequest = [(data) => data];
+      }
 
       if (req.onUploadProgress !== undefined) {
         const cb = req.onUploadProgress;
@@ -63,6 +69,15 @@ export function createAxiosTransport(instance: AxiosLikeInstance): Transport {
 function mapResponseType(responseType: TransportRequest['responseType']): AxiosLikeRequestConfig['responseType'] {
   if (responseType === undefined) return 'json';
   return responseType;
+}
+
+function normalizeHeaderCase(headers: Record<string, string> | undefined): Record<string, string> {
+  if (!headers) return {};
+  const out: Record<string, string> = {};
+  for (const [key, value] of Object.entries(headers)) {
+    out[key.toLowerCase() === 'content-type' ? 'content-type' : key] = value;
+  }
+  return out;
 }
 
 function normalizeAxiosHeaders(headers: unknown): Record<string, string> {

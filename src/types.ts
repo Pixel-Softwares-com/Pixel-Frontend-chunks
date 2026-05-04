@@ -27,6 +27,7 @@ export interface SendOptions {
   chunkThresholdBytes?: number;
   maxFormDataEntries?: number;
   useChunk?: boolean;
+  useFormData?: boolean;
   concurrency?: number;
   retries?: number;
   retryDelay?: number;

@@ -83,6 +83,7 @@ export async function send<T = unknown>(
   const { blob, contentType, formDataEntryCount } = await resolvePayload(
     data,
     merged.resumeSnapshotId,
+    { useFormData: options.useFormData },
   );
   const chunks = sliceBlob(blob, merged.chunkSize);
   const fullChecksum = await sha256Hex(blob);
@@ -111,8 +112,11 @@ export async function send<T = unknown>(
   };
 
   try {
-    const response = merged.useChunk === false || !shouldChunk(blob.size, formDataEntryCount, merged)
-      ? await sendDirect<T>(resolvedUrl, method, userHeaders, blob, contentType, chunked)
+    const willChunk = merged.useChunk !== false && shouldChunk(blob.size, formDataEntryCount, merged);
+    const directBody = !willChunk && typeof FormData !== 'undefined' && data instanceof FormData ? data : blob;
+    const directContentType = directBody === blob ? contentType : '';
+    const response = !willChunk
+      ? await sendDirect<T>(resolvedUrl, method, userHeaders, directBody as Blob, directContentType, chunked)
       : await sendChunked<T>(
           resolvedUrl,
           method,
@@ -139,6 +143,7 @@ export async function send<T = unknown>(
 async function resolvePayload(
   data: SendData,
   resumeSnapshotId: string | undefined,
+  options: { useFormData?: boolean },
 ): Promise<{ blob: Blob; contentType: string; formDataEntryCount: number | null }> {
   if (resumeSnapshotId) {
     const [blob, form] = await Promise.all([
@@ -149,7 +154,7 @@ async function resolvePayload(
       return { blob, contentType: form.contentType, formDataEntryCount: null };
     }
   }
-  return serialize(data);
+  return serialize(data, options);
 }
 
 async function ensureSnapshot(
